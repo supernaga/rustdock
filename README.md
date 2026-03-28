@@ -92,7 +92,8 @@ This repository is prepared for GitHub Actions manual builds.
 
 Notes:
 
-- The workflow currently builds debug desktop binaries, not signed release installers.
+- The workflow builds release bundle artifacts for each platform.
+- On Windows, prefer the generated installer inside the artifact bundle instead of a raw executable.
 - The workflow file is [build-clients.yml](.github/workflows/build-clients.yml).
 - The workflow assumes your default branch is `main` or `master`, but `workflow_dispatch` works regardless of branch naming.
 

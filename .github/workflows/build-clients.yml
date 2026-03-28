@@ -56,14 +56,14 @@ jobs:
         run: npm ci
 
       - name: Build desktop app
-        run: npx tauri build --debug
+        run: npx tauri build
 
       - name: Upload Linux artifact
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: src-tauri/target/debug/rustdock-desktop
+          path: src-tauri/target/release/bundle/**
           if-no-files-found: error
 
       - name: Upload Windows artifact
@@ -71,7 +71,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: src-tauri/target/debug/rustdock-desktop.exe
+          path: src-tauri/target/release/bundle/**
           if-no-files-found: error
 
       - name: Upload macOS artifact
@@ -79,5 +79,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: src-tauri/target/debug/rustdock-desktop
+          path: src-tauri/target/release/bundle/**
           if-no-files-found: error
