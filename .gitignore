@@ -1,0 +1,22 @@
+# Node / frontend
+node_modules/
+frontend/dist/
+
+# Rust build output
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Local editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Environment and caches
+.env
+.env.*
+
+# Local runtime artifacts
+*.log
+*.sqlite3
