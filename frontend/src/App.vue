@@ -709,7 +709,7 @@ function removeTerminalTab(sessionId: string) {
   }
 }
 
-async function saveSession() {
+async function saveSession(): Promise<SessionProfile | null> {
   busy.value = true
   try {
     const payload = toPayload(form.value)
@@ -718,8 +718,10 @@ async function saveSession() {
     selectedSessionId.value = saved.id
     form.value = draftFromSession(saved)
     statusLine.value = `已保存 ${saved.name}。`
+    return saved
   } catch (error) {
     statusLine.value = renderError(error)
+    return null
   } finally {
     busy.value = false
   }
@@ -761,10 +763,14 @@ async function deleteSession() {
 }
 
 async function saveAndConnectSession() {
-  await saveSession()
-  if (selectedSessionId.value) {
-    await connectTerminal()
+  statusLine.value = '正在保存并连接...'
+  const saved = await saveSession()
+  if (!saved) {
+    return
   }
+  await selectSession(saved)
+  await nextTick()
+  await connectTerminal()
 }
 
 async function connectTerminal() {
