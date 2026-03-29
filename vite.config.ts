@@ -19,7 +19,7 @@ export default defineConfig({
           if (!id.includes('node_modules')) {
             return
           }
-          if (id.includes('/vue')) {
+          if (id.includes('/vue/') || id.includes('/@vue/')) {
             return 'vendor-vue'
           }
           if (

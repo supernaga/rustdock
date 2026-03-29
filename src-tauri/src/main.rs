@@ -11,7 +11,7 @@ use rustdock_core::sftp::{
     create_remote_dir, delete_remote_path, download_remote_file, list_remote_dir, rename_remote_path,
     upload_local_file, write_remote_text_file, read_remote_text_file, MutationResult, RemoteDirectoryListing,
     RemoteTextFile, TransferProgress, TransferResult, download_remote_file_with_progress,
-    upload_local_file_with_progress,
+    upload_local_file_with_progress, SftpSessionCache,
 };
 use rustdock_core::ssh::{
     RusshSessionService, SessionController, SessionEvent, SessionService, SessionStatus,
@@ -42,6 +42,7 @@ struct AppState {
     session_service: RusshSessionService,
     controllers: Arc<Mutex<HashMap<String, SessionController>>>,
     transfer_controls: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    sftp_cache: SftpSessionCache,
     background_on_close: Arc<AtomicBool>,
     quitting: Arc<AtomicBool>,
 }
@@ -58,6 +59,7 @@ impl AppState {
             session_service,
             controllers: Arc::new(Mutex::new(HashMap::new())),
             transfer_controls: Arc::new(Mutex::new(HashMap::new())),
+            sftp_cache: SftpSessionCache::new(300),
             background_on_close: Arc::new(AtomicBool::new(true)),
             quitting: Arc::new(AtomicBool::new(false)),
         })

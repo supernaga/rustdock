@@ -3,10 +3,80 @@ use crate::ssh::{connect_authenticated, TrustOnFirstUseHandler};
 use anyhow::{anyhow, Context, Result};
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex};
+
+/// Cached SFTP session entry with creation timestamp for TTL eviction.
+struct CachedSftpEntry {
+    sftp: SftpSession,
+    _driver: tokio::task::JoinHandle<()>,
+    created_at: Instant,
+}
+
+/// Thread-safe cache for SFTP sessions keyed by session ID.
+/// Entries are evicted after `ttl_seconds`.
+#[derive(Clone)]
+pub struct SftpSessionCache {
+    entries: Arc<Mutex<HashMap<String, CachedSftpEntry>>>,
+    ttl_seconds: u64,
+}
+
+impl SftpSessionCache {
+    pub fn new(ttl_seconds: u64) -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            ttl_seconds,
+        }
+    }
+
+    /// Get a cached SFTP session or create a new one.
+    pub async fn get_or_connect(
+        &self,
+        profile: &SessionProfile,
+        secret: Option<&str>,
+    ) -> Result<SftpSession> {
+        let session_id = profile.id.clone();
+
+        // Try to reuse cached entry
+        {
+            let mut entries = self.entries.lock().await;
+            if let Some(entry) = entries.get(&session_id) {
+                if entry.created_at.elapsed().as_secs() < self.ttl_seconds {
+                    // Validate the cached session is still alive by attempting a trivial operation
+                    if entry.sftp.canonicalize(".").await.is_ok() {
+                        return Ok(entry.sftp.clone());
+                    }
+                }
+                // Expired or dead, remove it
+                entries.remove(&session_id);
+            }
+        }
+
+        // Create new session
+        let (sftp, driver) = open_sftp_raw(profile.clone(), secret).await?;
+        let cached = sftp.clone();
+
+        let mut entries = self.entries.lock().await;
+        entries.insert(session_id, CachedSftpEntry {
+            sftp,
+            _driver: driver,
+            created_at: Instant::now(),
+        });
+
+        Ok(cached)
+    }
+
+    /// Remove a cached session (e.g., on disconnect).
+    pub async fn invalidate(&self, session_id: &str) {
+        let mut entries = self.entries.lock().await;
+        entries.remove(session_id);
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RemoteDirEntry {
@@ -54,7 +124,7 @@ pub async fn list_remote_dir(
     path: String,
     secret: Option<String>,
 ) -> Result<RemoteDirectoryListing> {
-    let (sftp, _driver) = open_sftp(profile, secret.as_deref()).await?;
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
     let directory = sftp.canonicalize(&path).await.unwrap_or(path);
     let mut entries = Vec::new();
 
@@ -67,12 +137,17 @@ pub async fn list_remote_dir(
         let name = entry.file_name();
         let kind = format!("{:?}", entry.file_type());
         let is_dir = kind == "Directory";
+        let size = if is_dir {
+            None
+        } else {
+            Some(entry.metadata().len())
+        };
         entries.push(RemoteDirEntry {
             path: join_remote_path(&directory, &name),
             name,
             kind,
             is_dir,
-            size: None,
+            size,
         });
     }
 
@@ -107,7 +182,7 @@ pub async fn download_remote_file_with_progress<F>(
 where
     F: FnMut(TransferProgress) + Send,
 {
-    let (sftp, _driver) = open_sftp(profile, secret.as_deref()).await?;
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
     let total = sftp
         .metadata(&remote_path)
         .await
@@ -165,7 +240,7 @@ pub async fn upload_local_file_with_progress<F>(
 where
     F: FnMut(TransferProgress) + Send,
 {
-    let (sftp, _driver) = open_sftp(profile, secret.as_deref()).await?;
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
     let total = tokio::fs::metadata(&local_path).await.ok().map(|metadata| metadata.len());
     let mut local_file = TokioFile::open(&local_path)
         .await
@@ -196,7 +271,7 @@ pub async fn create_remote_dir(
     remote_path: String,
     secret: Option<String>,
 ) -> Result<MutationResult> {
-    let (sftp, _driver) = open_sftp(profile, secret.as_deref()).await?;
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
     sftp.create_dir(&remote_path)
         .await
         .with_context(|| format!("failed to create remote directory {remote_path}"))?;
@@ -209,7 +284,7 @@ pub async fn read_remote_text_file(
     remote_path: String,
     secret: Option<String>,
 ) -> Result<RemoteTextFile> {
-    let (sftp, _driver) = open_sftp(profile, secret.as_deref()).await?;
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
     let metadata = sftp
         .metadata(&remote_path)
         .await
@@ -256,7 +331,7 @@ pub async fn write_remote_text_file(
         ));
     }
 
-    let (sftp, _driver) = open_sftp(profile, secret.as_deref()).await?;
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
     let mut remote_file = sftp
         .create(&remote_path)
         .await
@@ -280,7 +355,7 @@ pub async fn rename_remote_path(
     target_path: String,
     secret: Option<String>,
 ) -> Result<MutationResult> {
-    let (sftp, _driver) = open_sftp(profile, secret.as_deref()).await?;
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
     sftp.rename(&source_path, &target_path)
         .await
         .with_context(|| format!("failed to rename remote path {source_path} to {target_path}"))?;
@@ -294,7 +369,7 @@ pub async fn delete_remote_path(
     is_dir: bool,
     secret: Option<String>,
 ) -> Result<MutationResult> {
-    let (sftp, _driver) = open_sftp(profile, secret.as_deref()).await?;
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
     if is_dir {
         sftp.remove_dir(&remote_path)
             .await
@@ -308,7 +383,7 @@ pub async fn delete_remote_path(
     Ok(MutationResult { path: remote_path })
 }
 
-async fn open_sftp(
+async fn open_sftp_raw(
     profile: SessionProfile,
     secret: Option<&str>,
 ) -> Result<(SftpSession, tokio::task::JoinHandle<()>)> {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { FitAddon as XTermFitAddon } from '@xterm/addon-fit'
-import type { Terminal as XTermTerminal } from 'xterm'
+import type { Terminal as XTermTerminal } from '@xterm/xterm'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 type SessionSyncState = 'LocalOnly' | 'PendingUpload' | 'Synced' | 'Conflict'
@@ -2164,6 +2164,14 @@ async function resumePersistedQueueIfNeeded() {
   await runTransferQueue()
 }
 
+function formatFileSize(bytes: number | null | undefined): string {
+  if (bytes == null) return '--'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
 function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path
 }
@@ -2206,7 +2214,7 @@ async function ensureTerminalRuntime() {
   }
 
   const [{ Terminal }, { FitAddon }, { WebglAddon }] = await Promise.all([
-    import('xterm'),
+    import('@xterm/xterm'),
     import('@xterm/addon-fit'),
     import('@xterm/addon-webgl')
   ])
@@ -2291,8 +2299,9 @@ onMounted(async () => {
   loadAutoRetrySettings()
   loadNotificationSetting()
   loadBackgroundOnCloseSetting()
+  loadTransferBehaviorSettings()
   await invoke('set_background_on_close', { enabled: backgroundOnClose.value })
-  installTerminal()
+  await installTerminal()
   await nextTick()
   await loadSessions()
   await loadTransferQueue()
@@ -2679,6 +2688,7 @@ onBeforeUnmount(() => {
                   class="sftp-entry"
                   @click="selectRemotePathForMutation(entry)"
                   @dblclick="openRemoteEntry(entry)"
+                  @contextmenu="openRemoteContextMenu($event, { path: entry.path, name: entry.name, isDir: entry.is_dir })"
                 >
                   <div class="sftp-entry-head">
                     <label class="checkbox-row">
@@ -2690,7 +2700,7 @@ onBeforeUnmount(() => {
                       />
                       <span>{{ entry.is_dir ? '目录' : '文件' }}</span>
                     </label>
-                    <small>{{ entry.size ?? '--' }}</small>
+                    <small>{{ formatFileSize(entry.size) }}</small>
                   </div>
                   <strong>{{ entry.name }}</strong>
                   <small>{{ entry.path }}</small>
@@ -2957,5 +2967,54 @@ onBeforeUnmount(() => {
         <span>{{ runningTransferCount }} 个执行中 · {{ queuedTransferCount }} 个排队中 · {{ failedTransferCount }} 个失败</span>
       </footer>
     </main>
+
+    <div
+      v-if="remoteContextMenu"
+      style="position:fixed;inset:0;z-index:999"
+      @click="closeRemoteContextMenu"
+      @contextmenu.prevent="closeRemoteContextMenu"
+    >
+      <div
+        class="panel"
+        :style="{
+          position: 'fixed',
+          left: remoteContextMenu.x + 'px',
+          top: remoteContextMenu.y + 'px',
+          zIndex: 1000,
+          padding: '8px 0',
+          minWidth: '180px',
+          borderRadius: '14px'
+        }"
+      >
+        <button
+          v-if="remoteContextMenu.target.isDir"
+          class="ghost"
+          style="width:100%;text-align:left;border-radius:0;border:none;"
+          @click="loadSftpDirectory(remoteContextMenu.target.path); closeRemoteContextMenu()"
+        >打开目录</button>
+        <button
+          v-if="!remoteContextMenu.target.isDir"
+          class="ghost"
+          style="width:100%;text-align:left;border-radius:0;border:none;"
+          @click="openRemoteTextFile(remoteContextMenu.target.path); closeRemoteContextMenu()"
+        >在编辑器中打开</button>
+        <button
+          v-if="!remoteContextMenu.target.isDir"
+          class="ghost"
+          style="width:100%;text-align:left;border-radius:0;border:none;"
+          @click="remoteTransferPath = remoteContextMenu.target.path; localTransferPath = remoteContextMenu.target.name; activeDockTab = 'browser'; closeRemoteContextMenu()"
+        >选为下载源</button>
+        <button
+          class="ghost"
+          style="width:100%;text-align:left;border-radius:0;border:none;"
+          @click="sftpRenameTarget = remoteContextMenu.target.path; remoteTransferPath = remoteContextMenu.target.path; closeRemoteContextMenu()"
+        >重命名</button>
+        <button
+          class="ghost danger"
+          style="width:100%;text-align:left;border-radius:0;border:none;"
+          @click="remoteTransferPath = remoteContextMenu.target.path; remoteTransferIsDir = remoteContextMenu.target.isDir; deleteRemotePath(); closeRemoteContextMenu()"
+        >删除</button>
+      </div>
+    </div>
   </div>
 </template>
