@@ -901,8 +901,34 @@ fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()>
 }
 
 fn known_hosts_path() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
-    Ok(PathBuf::from(home).join(".ssh").join("known_hosts"))
+    let home_dir = user_home_dir().ok_or_else(|| "Unable to determine user home directory".to_string())?;
+    Ok(home_dir.join(".ssh").join("known_hosts"))
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    env_var_path("HOME").or_else(|| {
+        #[cfg(target_os = "windows")]
+        {
+            env_var_path("USERPROFILE").or_else(|| {
+                let home_drive = env_var_path("HOMEDRIVE")?;
+                let home_path = env_var_path("HOMEPATH")?;
+                let mut combined = home_drive;
+                combined.push(home_path);
+                Some(combined)
+            })
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    })
+}
+
+fn env_var_path(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn remove_known_host_lines(lines: &[usize]) -> Result<(), String> {

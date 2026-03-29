@@ -492,11 +492,61 @@ impl SessionRepository for SqliteSessionStore {
 }
 
 fn default_data_dir() -> Result<PathBuf, String> {
-    let home_dir = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
-    Ok(PathBuf::from(home_dir)
-        .join(".local")
-        .join("share")
-        .join("rustdock"))
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata_dir) = env_var_path("APPDATA") {
+            return Ok(appdata_dir.join("RustDock"));
+        }
+
+        if let Some(home_dir) = home_dir() {
+            return Ok(home_dir.join("AppData").join("Roaming").join("RustDock"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home_dir) = home_dir() {
+            return Ok(home_dir
+                .join("Library")
+                .join("Application Support")
+                .join("RustDock"));
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Some(home_dir) = home_dir() {
+            return Ok(home_dir.join(".local").join("share").join("rustdock"));
+        }
+    }
+
+    Err("Unable to determine application data directory".to_string())
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env_var_path("HOME").or_else(|| {
+        #[cfg(target_os = "windows")]
+        {
+            env_var_path("USERPROFILE").or_else(|| {
+                let home_drive = env_var_path("HOMEDRIVE")?;
+                let home_path = env_var_path("HOMEPATH")?;
+                let mut combined = home_drive;
+                combined.push(home_path);
+                Some(combined)
+            })
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    })
+}
+
+fn env_var_path(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn serialize_json<T: Serialize>(value: &T) -> Result<String, SqlError> {
