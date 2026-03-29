@@ -209,7 +209,7 @@ const selectedSessionId = ref<string | null>(null)
 const loading = ref(false)
 const busy = ref(false)
 const sftpBusy = ref(false)
-const statusLine = ref('Ready.')
+const statusLine = ref('就绪。')
 const terminalStatus = ref<SessionStatus>('Idle')
 const activeTerminalId = ref<string | null>(null)
 const activeTerminalName = ref<string>('')
@@ -264,10 +264,10 @@ let terminal: XTermTerminal | null = null
 let fitAddon: XTermFitAddon | null = null
 let resizeHandler: (() => void) | null = null
 const dockTabs: Array<{ id: DockTab; label: string }> = [
-  { id: 'browser', label: 'SSH Browser' },
-  { id: 'editor', label: 'Editor' },
-  { id: 'queue', label: 'Transfer Queue' },
-  { id: 'activity', label: 'Activity' },
+  { id: 'browser', label: 'SSH 浏览器' },
+  { id: 'editor', label: '远程编辑器' },
+  { id: 'queue', label: '传输队列' },
+  { id: 'activity', label: '活动日志' },
   { id: 'hosts', label: 'known_hosts' }
 ]
 
@@ -334,7 +334,7 @@ const failedTransferCount = computed(
 )
 const selectedSessionSummary = computed(() => {
   if (!selectedSession.value) {
-    return 'Select a saved session or build a draft in the left rail.'
+    return '先在左侧选择一个已保存会话，或先新建一个草稿。'
   }
   return `${selectedSession.value.username}@${selectedSession.value.host}:${selectedSession.value.port}`
 })
@@ -343,19 +343,19 @@ const selectedSessionRemoteRoot = computed(
 )
 const selectedSessionAuthLabel = computed(() => {
   if (!selectedSession.value) {
-    return 'No auth selected'
+    return '未选择认证方式'
   }
   if (selectedSession.value.auth_method === 'Password') {
-    return 'Password auth'
+    return '密码认证'
   }
   if (selectedSession.value.auth_method === 'Agent') {
-    return 'SSH agent'
+    return 'SSH 代理'
   }
-  return `Key ${basename(selectedSession.value.auth_method.PrivateKey.path)}`
+  return `密钥 ${basename(selectedSession.value.auth_method.PrivateKey.path)}`
 })
 const selectedSessionTagSummary = computed(() => {
   if (!selectedSession.value?.tags.length) {
-    return 'No tags'
+    return '无标签'
   }
   return selectedSession.value.tags.join(' · ')
 })
@@ -363,20 +363,20 @@ const remoteEditorDirty = computed(
   () => remoteEditorPath.value.length > 0 && remoteEditorContent.value !== remoteEditorOriginalContent.value
 )
 const remoteEditorTitle = computed(() =>
-  remoteEditorPath.value ? basename(remoteEditorPath.value) : 'No file open'
+  remoteEditorPath.value ? basename(remoteEditorPath.value) : '未打开文件'
 )
 
 const secretPrompt = computed(() => {
   if (!selectedSession.value) {
-    return 'Session-only secret'
+    return '本次连接使用的凭据'
   }
   if (selectedSession.value.auth_method === 'Password') {
-    return 'Password'
+    return '密码'
   }
   if (typeof selectedSession.value.auth_method === 'object' && 'PrivateKey' in selectedSession.value.auth_method) {
-    return 'Key passphrase (optional)'
+    return '密钥口令（可选）'
   }
-  return 'Session-only secret'
+  return '本次连接使用的凭据'
 })
 
 async function loadSessions() {
@@ -389,7 +389,7 @@ async function loadSessions() {
         form.value = draftFromSession(refreshed)
       }
     }
-    statusLine.value = `Loaded ${sessions.value.length} sessions.`
+    statusLine.value = `已加载 ${sessions.value.length} 个会话。`
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -442,7 +442,7 @@ function startNewSession() {
   connectSecret.value = ''
   rememberSecret.value = false
   activeDockTab.value = 'browser'
-  statusLine.value = 'Draft reset.'
+  statusLine.value = '已重置草稿。'
 }
 
 async function selectSession(session: SessionProfile) {
@@ -452,7 +452,7 @@ async function selectSession(session: SessionProfile) {
   selectedSessionId.value = session.id
   form.value = draftFromSession(session)
   await restoreSessionContext(session)
-  statusLine.value = `Selected ${session.name}.`
+  statusLine.value = `已选择 ${session.name}。`
 }
 
 async function connectSessionFromList(session: SessionProfile) {
@@ -714,7 +714,7 @@ async function saveSession() {
     await loadSessions()
     selectedSessionId.value = saved.id
     form.value = draftFromSession(saved)
-    statusLine.value = `Saved ${saved.name}.`
+    statusLine.value = `已保存 ${saved.name}。`
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -724,16 +724,16 @@ async function saveSession() {
 
 async function deleteSession() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a session first.'
+    statusLine.value = '请先选择一个会话。'
     return
   }
 
   const accepted = await dialogConfirm(
-    `Delete session "${selectedSession.value?.name ?? selectedSessionId.value}"?`,
-    { title: 'Delete Session', kind: 'warning' }
+    `确认删除会话“${selectedSession.value?.name ?? selectedSessionId.value}”吗？`,
+    { title: '删除会话', kind: 'warning' }
   )
   if (!accepted) {
-    statusLine.value = 'Session deletion cancelled.'
+    statusLine.value = '已取消删除会话。'
     return
   }
 
@@ -749,7 +749,7 @@ async function deleteSession() {
       form.value = newDraft()
     }
     await loadSessions()
-    statusLine.value = 'Session deleted.'
+    statusLine.value = '会话已删除。'
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -766,11 +766,11 @@ async function saveAndConnectSession() {
 
 async function connectTerminal() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Save and select a session before connecting.'
+    statusLine.value = '连接前请先保存并选中会话。'
     return
   }
   if (!terminal || !fitAddon) {
-    statusLine.value = 'Terminal is not ready yet.'
+    statusLine.value = '终端尚未准备好。'
     return
   }
 
@@ -784,7 +784,7 @@ async function connectTerminal() {
     activeDockTab.value = 'browser'
     await loadSftpDirectory(selectedSessionRemoteRoot.value)
     terminal.focus()
-    statusLine.value = `Switched to ${existingTab.sessionName}.`
+    statusLine.value = `已切换到 ${existingTab.sessionName}。`
     return
   }
   if (existingTab) {
@@ -832,7 +832,7 @@ async function connectTerminal() {
     activeDockTab.value = 'browser'
     await loadSftpDirectory(selectedSessionRemoteRoot.value)
     terminal.focus()
-    statusLine.value = `Terminal attached to ${connection.session_name}.`
+    statusLine.value = `终端已连接到 ${connection.session_name}。`
     await loadSessions()
     await loadKnownHosts()
   } catch (error) {
@@ -845,7 +845,7 @@ async function connectTerminal() {
 
 async function disconnectTerminal() {
   if (!activeTerminalId.value) {
-    statusLine.value = 'No active terminal session.'
+    statusLine.value = '当前没有活动终端会话。'
     return
   }
 
@@ -853,7 +853,7 @@ async function disconnectTerminal() {
     const sessionId = activeTerminalId.value
     await invoke('disconnect_terminal', { sessionId })
     removeTerminalTab(sessionId)
-    statusLine.value = 'Terminal disconnected.'
+    statusLine.value = '终端已断开。'
   } catch (error) {
     statusLine.value = renderError(error)
   }
@@ -886,7 +886,7 @@ function closeTerminalState() {
 
 async function loadSftpDirectory(path?: string) {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
 
@@ -904,7 +904,7 @@ async function loadSftpDirectory(path?: string) {
     selectedRemotePaths.value = selectedRemotePaths.value.filter((selectedPath) =>
       listing.entries.some((entry) => entry.path === selectedPath)
     )
-    statusLine.value = `Loaded ${listing.entries.length} entries from ${listing.directory}.`
+    statusLine.value = `已加载 ${listing.directory} 下的 ${listing.entries.length} 个条目。`
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -997,7 +997,7 @@ function selectRemotePathForMutation(entry: RemoteDirEntry) {
   remoteTransferPath.value = entry.path
   remoteTransferIsDir.value = entry.is_dir
   sftpRenameTarget.value = entry.path
-  statusLine.value = `Selected ${entry.path}.`
+  statusLine.value = `已选择 ${entry.path}。`
 }
 
 function toggleRemoteSelection(entry: RemoteDirEntry) {
@@ -1030,11 +1030,11 @@ function goToParentDirectory() {
 
 async function downloadSelectedRemoteFile() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
   if (!remoteTransferPath.value.trim() || !localTransferPath.value.trim()) {
-    statusLine.value = 'Set both remote and local paths before downloading.'
+    statusLine.value = '下载前请先填写远程路径和本地路径。'
     return
   }
 
@@ -1048,7 +1048,7 @@ async function downloadSelectedRemoteFile() {
         secret: connectSecret.value.trim() || null
       }
     })
-    statusLine.value = `Downloaded ${result.bytes} bytes to ${result.path}.`
+    statusLine.value = `已下载 ${result.bytes} 字节到 ${result.path}。`
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -1058,11 +1058,11 @@ async function downloadSelectedRemoteFile() {
 
 async function uploadLocalFile() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
   if (!remoteTransferPath.value.trim() || !localTransferPath.value.trim()) {
-    statusLine.value = 'Set both local and remote paths before uploading.'
+    statusLine.value = '上传前请先填写本地路径和远程路径。'
     return
   }
 
@@ -1076,7 +1076,7 @@ async function uploadLocalFile() {
         secret: connectSecret.value.trim() || null
       }
     })
-    statusLine.value = `Uploaded ${result.bytes} bytes to ${result.path}.`
+    statusLine.value = `已上传 ${result.bytes} 字节到 ${result.path}。`
     await loadSftpDirectory(sftpPath.value)
   } catch (error) {
     statusLine.value = renderError(error)
@@ -1115,11 +1115,11 @@ async function chooseDownloadLocalPath() {
 
 async function queueDownloadJob() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
   if (!remoteTransferPath.value.trim() || !localTransferPath.value.trim()) {
-    statusLine.value = 'Set both remote and local paths before queueing a download.'
+    statusLine.value = '加入下载队列前请先填写远程路径和本地路径。'
     return
   }
 
@@ -1130,7 +1130,7 @@ async function queueDownloadJob() {
     remotePath: remoteTransferPath.value.trim(),
     localPath: localTransferPath.value.trim(),
     status: 'queued',
-    message: 'Waiting',
+    message: '等待中',
     attemptCount: 0,
     maxRetries: defaultMaxRetries.value,
     createdAt: nowEpoch(),
@@ -1138,18 +1138,18 @@ async function queueDownloadJob() {
   }
   transferQueue.value.push(job)
   await persistTransferJob(job)
-  await appendTransferEvent(job, 'info', `Queued download ${job.remotePath}`)
+  await appendTransferEvent(job, 'info', `已加入下载队列：${job.remotePath}`)
   await updateTrayQueueStatus()
-  statusLine.value = 'Download queued.'
+  statusLine.value = '已加入下载队列。'
 }
 
 async function queueUploadJob() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
   if (!remoteTransferPath.value.trim() || !localTransferPath.value.trim()) {
-    statusLine.value = 'Set both local and remote paths before queueing an upload.'
+    statusLine.value = '加入上传队列前请先填写本地路径和远程路径。'
     return
   }
 
@@ -1160,7 +1160,7 @@ async function queueUploadJob() {
     remotePath: remoteTransferPath.value.trim(),
     localPath: localTransferPath.value.trim(),
     status: 'queued',
-    message: 'Waiting',
+    message: '等待中',
     attemptCount: 0,
     maxRetries: defaultMaxRetries.value,
     createdAt: nowEpoch(),
@@ -1168,9 +1168,9 @@ async function queueUploadJob() {
   }
   transferQueue.value.push(job)
   await persistTransferJob(job)
-  await appendTransferEvent(job, 'info', `Queued upload ${job.localPath}`)
+  await appendTransferEvent(job, 'info', `已加入上传队列：${job.localPath}`)
   await updateTrayQueueStatus()
-  statusLine.value = 'Upload queued.'
+  statusLine.value = '已加入上传队列。'
 }
 
 async function runTransferQueue() {
@@ -1189,9 +1189,9 @@ async function runTransferQueue() {
       await runQueuedTransfer(nextJob)
     }
 
-    statusLine.value = queueStopRequested.value ? 'Transfer queue paused.' : 'Transfer queue finished.'
+    statusLine.value = queueStopRequested.value ? '传输队列已暂停。' : '传输队列已完成。'
     if (!queueStopRequested.value) {
-      await notifyUser('Transfer Queue Finished', 'All queued transfers have completed.')
+      await notifyUser('传输队列完成', '所有排队任务都已处理完成。')
     }
     if (selectedSessionId.value) {
       await loadSftpDirectory(sftpPath.value)
@@ -1221,7 +1221,7 @@ function requestQueueStop() {
     return
   }
   queueStopRequested.value = true
-  statusLine.value = 'Queue will stop after the current transfer.'
+  statusLine.value = '队列会在当前任务完成后停止。'
 }
 
 async function retryTransferJob(jobId: string) {
@@ -1230,13 +1230,13 @@ async function retryTransferJob(jobId: string) {
     return
   }
   job.status = 'queued'
-  job.message = 'Retry queued'
+  job.message = '已加入重试队列'
   delete job.bytes
   delete job.transferred
   delete job.total
   job.updatedAt = nowEpoch()
   await persistTransferJob(job)
-  await appendTransferEvent(job, 'info', `Queued retry for ${job.remotePath}`)
+  await appendTransferEvent(job, 'info', `已加入重试队列：${job.remotePath}`)
 }
 
 async function removeTransferJob(jobId: string) {
@@ -1247,7 +1247,7 @@ async function removeTransferJob(jobId: string) {
   transferQueue.value = transferQueue.value.filter((entry) => entry.id !== jobId)
   await deletePersistedTransferJob(jobId)
   if (job) {
-    await appendTransferEvent(job, 'warning', `Removed job ${job.id} from queue`)
+    await appendTransferEvent(job, 'warning', `已从队列移除任务 ${job.id}`)
   }
   await updateTrayQueueStatus()
 }
@@ -1261,7 +1261,7 @@ async function removeTransferJobInternal(job: TransferJob) {
 async function runQueuedTransfer(job: TransferJob) {
   job.attemptCount += 1
   job.status = 'running'
-  job.message = `Starting attempt ${job.attemptCount}/${job.maxRetries + 1}`
+  job.message = `开始执行第 ${job.attemptCount}/${job.maxRetries + 1} 次尝试`
   job.transferred = 0
   job.total = null
   job.updatedAt = nowEpoch()
@@ -1269,7 +1269,7 @@ async function runQueuedTransfer(job: TransferJob) {
   await appendTransferEvent(
     job,
     'info',
-    `Started ${job.kind} attempt ${job.attemptCount}/${job.maxRetries + 1}`
+    `${transferKindLabel(job.kind)}任务开始执行，第 ${job.attemptCount}/${job.maxRetries + 1} 次尝试`
   )
   const secret = await resolveSecretForSession(job.sessionId)
 
@@ -1281,7 +1281,7 @@ async function runQueuedTransfer(job: TransferJob) {
       }
 
       if (message.kind === 'started') {
-        job.message = 'Connected'
+        job.message = '已连接'
       } else if (message.kind === 'progress') {
         job.transferred = message.transferred
         job.total = message.total
@@ -1294,11 +1294,11 @@ async function runQueuedTransfer(job: TransferJob) {
         job.updatedAt = nowEpoch()
         job.message =
           job.kind === 'upload'
-            ? `Uploaded ${message.bytes} bytes`
-            : `Downloaded ${message.bytes} bytes`
+            ? `已上传 ${message.bytes} 字节`
+            : `已下载 ${message.bytes} 字节`
         void persistTransferJob(job)
         void appendTransferEvent(job, 'info', job.message)
-        void notifyUser('Transfer Completed', job.message)
+        void notifyUser('传输完成', job.message)
         if (autoRemoveSuccessfulJobs.value) {
           void removeTransferJobInternal(job)
         } else {
@@ -1307,10 +1307,10 @@ async function runQueuedTransfer(job: TransferJob) {
         resolve()
       } else if (message.kind === 'cancelled') {
         job.status = 'error'
-        job.message = 'Cancelled'
+        job.message = '已取消'
         job.updatedAt = nowEpoch()
         void persistTransferJob(job)
-        void appendTransferEvent(job, 'warning', `Cancelled ${job.kind} job`)
+        void appendTransferEvent(job, 'warning', `已取消${transferKindLabel(job.kind)}任务`)
         void updateTrayQueueStatus()
         resolve()
       } else if (message.kind === 'failed') {
@@ -1346,7 +1346,7 @@ async function cancelRunningTransfer(jobId: string) {
     await invoke('cancel_sftp_transfer', {
       request: { job_id: jobId }
     })
-    job.message = 'Cancelling...'
+    job.message = '正在取消...'
     job.updatedAt = nowEpoch()
     await persistTransferJob(job)
   } catch (error) {
@@ -1356,11 +1356,11 @@ async function cancelRunningTransfer(jobId: string) {
 
 async function createRemoteDirectory() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
   if (!sftpCreatePath.value.trim()) {
-    statusLine.value = 'Enter a remote directory path to create.'
+    statusLine.value = '请输入要创建的远程目录路径。'
     return
   }
 
@@ -1373,7 +1373,7 @@ async function createRemoteDirectory() {
         secret: connectSecret.value.trim() || null
       }
     })
-    statusLine.value = `Created directory ${result.path}.`
+    statusLine.value = `已创建目录 ${result.path}。`
     sftpCreatePath.value = ''
     await loadSftpDirectory(sftpPath.value)
   } catch (error) {
@@ -1385,11 +1385,11 @@ async function createRemoteDirectory() {
 
 async function renameRemotePath() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
   if (!remoteTransferPath.value.trim() || !sftpRenameTarget.value.trim()) {
-    statusLine.value = 'Set both source and target paths before renaming.'
+    statusLine.value = '重命名前请先填写源路径和目标路径。'
     return
   }
 
@@ -1405,7 +1405,7 @@ async function renameRemotePath() {
     })
     remoteTransferPath.value = result.path
     sftpRenameTarget.value = result.path
-    statusLine.value = `Renamed remote path to ${result.path}.`
+    statusLine.value = `已将远程路径重命名为 ${result.path}。`
     await loadSftpDirectory(sftpPath.value)
   } catch (error) {
     statusLine.value = renderError(error)
@@ -1416,20 +1416,20 @@ async function renameRemotePath() {
 
 async function deleteRemotePath() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
   if (!remoteTransferPath.value.trim()) {
-    statusLine.value = 'Select a remote path before deleting.'
+    statusLine.value = '删除前请先选择远程路径。'
     return
   }
 
   const accepted = await dialogConfirm(
-    `Delete ${remoteTransferIsDir.value ? 'directory' : 'file'} "${remoteTransferPath.value.trim()}"?`,
-    { title: 'Delete Remote Path', kind: 'warning' }
+    `确认删除${remoteTransferIsDir.value ? '目录' : '文件'}“${remoteTransferPath.value.trim()}”吗？`,
+    { title: '删除远程路径', kind: 'warning' }
   )
   if (!accepted) {
-    statusLine.value = 'Remote delete cancelled.'
+    statusLine.value = '已取消删除远程路径。'
     return
   }
 
@@ -1443,7 +1443,7 @@ async function deleteRemotePath() {
         secret: connectSecret.value.trim() || null
       }
     })
-    statusLine.value = `Deleted ${result.path}.`
+    statusLine.value = `已删除 ${result.path}。`
     if (remoteEditorPath.value === result.path) {
       remoteEditorPath.value = ''
       remoteEditorContent.value = ''
@@ -1462,7 +1462,7 @@ async function deleteRemotePath() {
 
 async function batchQueueDownloads() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
 
@@ -1470,7 +1470,7 @@ async function batchQueueDownloads() {
     (entry) => selectedRemotePaths.value.includes(entry.path) && !entry.is_dir
   )
   if (!selectedEntries.length) {
-    statusLine.value = 'Select one or more files to queue downloads.'
+    statusLine.value = '请至少选择一个文件加入下载队列。'
     return
   }
 
@@ -1490,7 +1490,7 @@ async function batchQueueDownloads() {
       remotePath: entry.path,
       localPath: `${selected.replace(/[\\/]$/, '')}/${entry.name}`,
       status: 'queued',
-      message: 'Waiting',
+      message: '等待中',
       attemptCount: 0,
       maxRetries: defaultMaxRetries.value,
       createdAt: nowEpoch(),
@@ -1498,15 +1498,15 @@ async function batchQueueDownloads() {
     }
     transferQueue.value.push(job)
     await persistTransferJob(job)
-    await appendTransferEvent(job, 'info', `Queued batch download ${job.remotePath}`)
+    await appendTransferEvent(job, 'info', `已加入批量下载队列：${job.remotePath}`)
   }
 
-  statusLine.value = `Queued ${selectedEntries.length} downloads.`
+  statusLine.value = `已加入 ${selectedEntries.length} 个下载任务。`
 }
 
 async function batchQueueUploads() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
 
@@ -1529,7 +1529,7 @@ async function batchQueueUploads() {
       remotePath: joinRemotePath(targetDirectory, basename(localPath)),
       localPath,
       status: 'queued',
-      message: 'Waiting',
+      message: '等待中',
       attemptCount: 0,
       maxRetries: defaultMaxRetries.value,
       createdAt: nowEpoch(),
@@ -1537,30 +1537,30 @@ async function batchQueueUploads() {
     }
     transferQueue.value.push(job)
     await persistTransferJob(job)
-    await appendTransferEvent(job, 'info', `Queued batch upload ${job.localPath}`)
+    await appendTransferEvent(job, 'info', `已加入批量上传队列：${job.localPath}`)
   }
 
-  statusLine.value = `Queued ${files.length} uploads to ${targetDirectory}.`
+  statusLine.value = `已加入 ${files.length} 个上传任务到 ${targetDirectory}。`
 }
 
 async function batchDeleteSelectedRemote() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
 
   const selectedEntries = sftpEntries.value.filter((entry) => selectedRemotePaths.value.includes(entry.path))
   if (!selectedEntries.length) {
-    statusLine.value = 'Select one or more remote paths to delete.'
+    statusLine.value = '请至少选择一个远程路径再删除。'
     return
   }
 
   const accepted = await dialogConfirm(
-    `Delete ${selectedEntries.length} selected remote paths from ${sftpPath.value}?`,
-    { title: 'Batch Delete Remote Paths', kind: 'warning' }
+    `确认删除 ${sftpPath.value} 下选中的 ${selectedEntries.length} 个远程路径吗？`,
+    { title: '批量删除远程路径', kind: 'warning' }
   )
   if (!accepted) {
-    statusLine.value = 'Batch delete cancelled.'
+    statusLine.value = '已取消批量删除。'
     return
   }
 
@@ -1577,7 +1577,7 @@ async function batchDeleteSelectedRemote() {
       })
     }
     selectedRemotePaths.value = []
-    statusLine.value = `Deleted ${selectedEntries.length} remote paths.`
+    statusLine.value = `已删除 ${selectedEntries.length} 个远程路径。`
     await loadSftpDirectory(sftpPath.value)
   } catch (error) {
     statusLine.value = renderError(error)
@@ -1666,13 +1666,13 @@ function decodeAuthMethod(auth: AuthMethod): { type: DraftAuthType; path: string
 function syncLabel(value: SessionSyncState): string {
   switch (value) {
     case 'PendingUpload':
-      return 'Pending upload'
+      return '待上传'
     case 'Synced':
-      return 'Synced'
+      return '已同步'
     case 'Conflict':
-      return 'Conflict'
+      return '冲突'
     default:
-      return 'Local only'
+      return '仅本地'
   }
 }
 
@@ -1683,15 +1683,58 @@ function renderError(error: unknown): string {
   if (error && typeof error === 'object' && 'message' in error) {
     return String((error as { message: unknown }).message)
   }
-  return 'Operation failed.'
+  return '操作失败。'
+}
+
+function terminalStatusLabel(value: SessionStatus): string {
+  switch (value) {
+    case 'Idle':
+      return '空闲'
+    case 'Connecting':
+      return '连接中'
+    case 'Connected':
+      return '已连接'
+    case 'Disconnected':
+      return '已断开'
+    case 'Failed':
+      return '失败'
+  }
+}
+
+function transferStatusLabel(value: TransferJobStatus): string {
+  switch (value) {
+    case 'queued':
+      return '排队中'
+    case 'running':
+      return '执行中'
+    case 'success':
+      return '成功'
+    case 'error':
+      return '失败'
+  }
+}
+
+function transferKindLabel(value: TransferJobKind): string {
+  return value === 'upload' ? '上传' : '下载'
+}
+
+function transferLevelLabel(value: TransferEventLevel): string {
+  switch (value) {
+    case 'warning':
+      return '警告'
+    case 'error':
+      return '错误'
+    default:
+      return '信息'
+  }
 }
 
 function renderTransferProgress(transferred: number, total: number | null): string {
   if (!total || total <= 0) {
-    return `${transferred} bytes`
+    return `${transferred} 字节`
   }
   const percent = Math.min(100, Math.round((transferred / total) * 100))
-  return `${percent}% · ${transferred}/${total} bytes`
+  return `${percent}% · ${transferred}/${total} 字节`
 }
 
 function computeRetryDelaySeconds(attemptCount: number): number {
@@ -1722,17 +1765,17 @@ async function finalizeTransferFailure(job: TransferJob, errorMessage: string) {
   job.updatedAt = nowEpoch()
   await persistTransferJob(job)
   await appendTransferEvent(job, 'error', errorMessage)
-  await notifyUser('Transfer Failed', errorMessage)
+    await notifyUser('传输失败', errorMessage)
   await updateTrayQueueStatus()
 }
 
 async function saveCurrentSecret() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
   if (!connectSecret.value.trim()) {
-    statusLine.value = 'Secret is empty.'
+    statusLine.value = '凭据不能为空。'
     return
   }
   await invoke('save_session_secret', {
@@ -1740,32 +1783,32 @@ async function saveCurrentSecret() {
     secret: connectSecret.value.trim()
   })
   rememberSecret.value = true
-  statusLine.value = 'Secret saved to the system keychain.'
+  statusLine.value = '凭据已保存到系统钥匙串。'
 }
 
 async function forgetSavedSecret() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
   await invoke('delete_session_secret', { sessionId: selectedSessionId.value })
   connectSecret.value = ''
   rememberSecret.value = false
-  statusLine.value = 'Saved secret removed from the system keychain.'
+  statusLine.value = '已从系统钥匙串移除保存的凭据。'
 }
 
 async function forgetSelectedSessionKnownHost() {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
 
   const accepted = await dialogConfirm(
-    `Forget known_hosts entries for "${selectedSession.value?.host ?? selectedSessionId.value}"?`,
-    { title: 'Forget Known Host', kind: 'warning' }
+    `确认忘记 “${selectedSession.value?.host ?? selectedSessionId.value}” 的 known_hosts 记录吗？`,
+    { title: '忘记已知主机', kind: 'warning' }
   )
   if (!accepted) {
-    statusLine.value = 'Known host removal cancelled.'
+    statusLine.value = '已取消移除 known_hosts 记录。'
     return
   }
 
@@ -1774,7 +1817,7 @@ async function forgetSelectedSessionKnownHost() {
       sessionId: selectedSessionId.value
     })
     await loadKnownHosts()
-    statusLine.value = removed > 0 ? `Removed ${removed} known_hosts entries.` : 'No known_hosts entries matched this session.'
+    statusLine.value = removed > 0 ? `已移除 ${removed} 条 known_hosts 记录。` : '当前会话没有匹配的 known_hosts 记录。'
   } catch (error) {
     statusLine.value = renderError(error)
   }
@@ -1782,8 +1825,8 @@ async function forgetSelectedSessionKnownHost() {
 
 async function removeKnownHostLine(entry: KnownHostEntry) {
   const accepted = await dialogConfirm(
-    `Remove known_hosts line ${entry.line} for ${entry.hosts}?`,
-    { title: 'Remove Known Host Entry', kind: 'warning' }
+    `确认删除 known_hosts 第 ${entry.line} 行（${entry.hosts}）吗？`,
+    { title: '删除已知主机记录', kind: 'warning' }
   )
   if (!accepted) {
     return
@@ -1792,7 +1835,7 @@ async function removeKnownHostLine(entry: KnownHostEntry) {
   try {
     await invoke('remove_known_host_entry', { line: entry.line })
     await loadKnownHosts()
-    statusLine.value = `Removed known_hosts line ${entry.line}.`
+    statusLine.value = `已删除 known_hosts 第 ${entry.line} 行。`
   } catch (error) {
     statusLine.value = renderError(error)
   }
@@ -1807,11 +1850,11 @@ async function resolveSecretForSession(sessionId: string): Promise<string | null
 
 async function openRemoteTextFile(path = remoteTransferPath.value.trim()) {
   if (!selectedSessionId.value) {
-    statusLine.value = 'Select a saved session first.'
+    statusLine.value = '请先选择一个已保存的会话。'
     return
   }
   if (!path) {
-    statusLine.value = 'Select a remote file first.'
+    statusLine.value = '请先选择一个远程文件。'
     return
   }
 
@@ -1829,7 +1872,7 @@ async function openRemoteTextFile(path = remoteTransferPath.value.trim()) {
     remoteEditorOriginalContent.value = file.content
     remoteTransferPath.value = file.path
     activeDockTab.value = 'editor'
-    statusLine.value = `Loaded ${file.bytes} bytes from ${file.path}.`
+    statusLine.value = `已从 ${file.path} 读取 ${file.bytes} 字节。`
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -1839,7 +1882,7 @@ async function openRemoteTextFile(path = remoteTransferPath.value.trim()) {
 
 async function saveRemoteTextFile() {
   if (!selectedSessionId.value || !remoteEditorPath.value) {
-    statusLine.value = 'Open a remote text file first.'
+    statusLine.value = '请先打开一个远程文本文件。'
     return
   }
 
@@ -1854,7 +1897,7 @@ async function saveRemoteTextFile() {
       }
     })
     remoteEditorOriginalContent.value = remoteEditorContent.value
-    statusLine.value = `Saved ${remoteEditorPath.value}.`
+    statusLine.value = `已保存 ${remoteEditorPath.value}。`
     await loadSftpDirectory(sftpPath.value)
   } catch (error) {
     statusLine.value = renderError(error)
@@ -2094,8 +2137,8 @@ async function updateTrayQueueStatus() {
   const title = running > 0 ? `RD ${running}` : null
   const tooltip =
     running > 0 || queued > 0 || failed > 0
-      ? `RustDock: ${running} running, ${queued} queued, ${failed} failed`
-      : 'RustDock: idle'
+      ? `RustDock：${running} 个执行中，${queued} 个排队中，${failed} 个失败`
+      : 'RustDock：空闲'
 
   await invoke('update_tray_status', { title, tooltip })
 }
@@ -2108,7 +2151,7 @@ async function resumePersistedQueueIfNeeded() {
   if (!hasQueuedJobs) {
     return
   }
-  statusLine.value = 'Recovered queued transfers from the previous session.'
+  statusLine.value = '已恢复上次会话遗留的队列任务。'
   await runTransferQueue()
 }
 
@@ -2125,7 +2168,7 @@ function joinRemotePath(directory: string, name: string): string {
 
 function formatTimestamp(timestamp: number | null): string {
   if (!timestamp) {
-    return 'Never'
+    return '从未'
   }
   return new Date(timestamp * 1000).toLocaleString()
 }
@@ -2194,7 +2237,7 @@ async function ensureTerminalRuntime() {
   try {
     terminal.loadAddon(new WebglAddon())
   } catch {
-    statusLine.value = 'WebGL terminal renderer unavailable. Falling back to canvas.'
+    statusLine.value = 'WebGL 终端渲染不可用，已回退到 canvas。'
   }
 
   terminal.open(terminalHost.value)
@@ -2265,26 +2308,26 @@ onBeforeUnmount(() => {
   <div class="app-shell">
     <aside class="left-rail">
       <div class="brand-block">
-        <p class="eyebrow">MobaXterm-Inspired</p>
+        <p class="eyebrow">中文工作台</p>
         <h1>RustDock</h1>
         <p class="subcopy">
-          Session bookmarks on the left, terminal in the center, SSH browser docked on demand.
+          左侧管理会话书签，中间是终端主工作区，右侧是可停靠的 SSH 文件浏览与编辑面板。
         </p>
       </div>
 
       <div class="rail-actions">
-        <button class="primary" @click="startNewSession">New Session</button>
-        <button class="ghost" :disabled="loading" @click="loadSessions">Reload</button>
+        <button class="primary" @click="startNewSession">新建会话</button>
+        <button class="ghost" :disabled="loading" @click="loadSessions">刷新列表</button>
       </div>
 
       <label class="search-card">
-        <span>Session Search</span>
-        <input v-model="sessionFilter" placeholder="host, tag, username" />
+        <span>会话搜索</span>
+        <input v-model="sessionFilter" placeholder="主机、标签、用户名" />
       </label>
 
       <div class="session-directory">
         <div class="section-title">
-          <span>Saved Sessions</span>
+          <span>已保存会话</span>
           <span>{{ filteredSessions.length }}</span>
         </div>
 
@@ -2301,70 +2344,70 @@ onBeforeUnmount(() => {
         >
           <div class="session-card-head">
             <strong>{{ session.name }}</strong>
-            <span class="badge">{{ session.id === activeTerminalId ? 'Live' : syncLabel(session.sync_state) }}</span>
+            <span class="badge">{{ session.id === activeTerminalId ? '在线' : syncLabel(session.sync_state) }}</span>
           </div>
           <span>{{ session.username }}@{{ session.host }}:{{ session.port }}</span>
           <small>
             {{
               session.tags.length
                 ? session.tags.join(' · ')
-                : `Last seen ${formatTimestamp(session.last_connected_at)}`
+                : `上次连接 ${formatTimestamp(session.last_connected_at)}`
             }}
           </small>
         </button>
 
         <p v-if="!filteredSessions.length" class="empty-copy">
-          No saved sessions yet. Fill the draft below, save it, then double-click to connect.
+          还没有已保存会话。先在下方填写草稿并保存，然后双击即可连接。
         </p>
       </div>
 
       <section class="editor-card">
         <div class="panel-head panel-head--tight">
           <div>
-            <p class="eyebrow">Session Draft</p>
-            <h2>{{ form.id ? 'Edit Profile' : 'Quick Connect Draft' }}</h2>
+            <p class="eyebrow">会话草稿</p>
+            <h2>{{ form.id ? '编辑配置' : '快速连接草稿' }}</h2>
           </div>
           <div class="actions">
             <button class="ghost danger" :disabled="busy || !selectedSessionId" @click="deleteSession">
-              Delete
+              删除
             </button>
-            <button class="primary" :disabled="busy" @click="saveSession">Save</button>
+            <button class="primary" :disabled="busy" @click="saveSession">保存</button>
           </div>
         </div>
 
         <div class="editor-grid">
           <label>
-            <span>Name</span>
-            <input v-model="form.name" placeholder="Production Bastion" />
+            <span>名称</span>
+            <input v-model="form.name" placeholder="生产堡垒机" />
           </label>
           <label>
-            <span>Host</span>
+            <span>主机</span>
             <input v-model="form.host" placeholder="bastion.example.com" />
           </label>
           <label>
-            <span>Port</span>
+            <span>端口</span>
             <input v-model="form.port" inputmode="numeric" />
           </label>
           <label>
-            <span>Username</span>
+            <span>用户名</span>
             <input v-model="form.username" placeholder="root" />
           </label>
           <label>
-            <span>Auth</span>
+            <span>认证方式</span>
             <select v-model="form.authType">
-              <option value="private-key">Private key</option>
-              <option value="agent">SSH agent</option>
-              <option value="password">Password</option>
+              <option value="private-key">私钥</option>
+              <option value="agent">SSH 代理</option>
+              <option value="password">密码</option>
             </select>
           </label>
           <label v-if="form.authType === 'private-key'">
-            <span>Key Path</span>
+            <span>密钥路径</span>
             <input v-model="form.keyPath" placeholder="~/.ssh/id_ed25519" />
           </label>
           <label v-else>
-            <span>Mode</span>
+            <span>说明</span>
             <input
-              :value="form.authType === 'agent' ? 'Agent-backed session' : 'Password stored in memory unless saved'"
+              :value="form.authType === 'agent' ? '通过 SSH 代理认证' : '密码仅保存在内存中，除非你手动保存'"
               disabled
             />
           </label>
@@ -2372,29 +2415,29 @@ onBeforeUnmount(() => {
 
         <div class="stack compact-stack">
           <label>
-            <span>Tags</span>
+            <span>标签</span>
             <input v-model="form.tagsInput" placeholder="prod, ssh, eu-west" />
           </label>
           <label>
-            <span>Remote Bookmarks</span>
+            <span>远程书签</span>
             <textarea v-model="form.remoteRootsInput" rows="4" placeholder="/home/root&#10;/var/www" />
           </label>
           <label>
-            <span>Local Bookmarks</span>
+            <span>本地书签</span>
             <textarea v-model="form.localRootsInput" rows="3" placeholder="/srv/app&#10;/var/log" />
           </label>
           <label>
-            <span>Notes</span>
-            <textarea v-model="form.notes" rows="3" placeholder="Jump host, prod only, key rotation monthly" />
+            <span>备注</span>
+            <textarea v-model="form.notes" rows="3" placeholder="跳板机、仅生产环境、密钥按月轮换" />
           </label>
         </div>
 
         <div class="actions actions--spread">
           <button class="ghost" :disabled="busy || !selectedSessionId" @click="connectTerminal">
-            Connect
+            连接
           </button>
           <button class="primary" :disabled="busy" @click="saveAndConnectSession">
-            Save & Connect
+            保存并连接
           </button>
         </div>
       </section>
@@ -2403,7 +2446,7 @@ onBeforeUnmount(() => {
     <main class="workspace-shell">
       <header class="topbar">
         <div class="workspace-tabs">
-          <button class="workspace-tab active">Workbench</button>
+          <button class="workspace-tab active">工作台</button>
           <button
             v-for="tab in orderedTerminalTabs"
             :key="tab.sessionId"
@@ -2416,20 +2459,20 @@ onBeforeUnmount(() => {
           >
             <span>{{ tab.sessionName }}</span>
             <small v-if="tab.unread">{{ tab.unread }}</small>
-            <span class="workspace-tab-status">{{ tab.status }}</span>
+            <span class="workspace-tab-status">{{ terminalStatusLabel(tab.status) }}</span>
             <span class="workspace-tab-close" @click.stop="closeTerminalTab(tab.sessionId)">×</span>
           </button>
           <span class="workspace-caption">{{ selectedSessionSummary }}</span>
         </div>
 
         <div class="actions toolbar-actions">
-          <button class="ghost" :disabled="busy || !selectedSessionId" @click="connectTerminal">Connect</button>
-          <button class="ghost danger" :disabled="!activeTerminalId" @click="disconnectTerminal">Disconnect</button>
-          <button class="ghost" :disabled="!selectedSessionId" @click="openDockTab('browser')">Browser</button>
-          <button class="ghost" :disabled="!selectedSessionId" @click="openDockTab('editor')">Editor</button>
-          <button class="ghost" @click="openDockTab('queue')">Queue</button>
-          <button class="ghost" @click="openDockTab('activity')">Activity</button>
-          <button class="ghost" @click="openDockTab('hosts')">Hosts</button>
+          <button class="ghost" :disabled="busy || !selectedSessionId" @click="connectTerminal">连接</button>
+          <button class="ghost danger" :disabled="!activeTerminalId" @click="disconnectTerminal">断开</button>
+          <button class="ghost" :disabled="!selectedSessionId" @click="openDockTab('browser')">文件</button>
+          <button class="ghost" :disabled="!selectedSessionId" @click="openDockTab('editor')">编辑器</button>
+          <button class="ghost" @click="openDockTab('queue')">队列</button>
+          <button class="ghost" @click="openDockTab('activity')">活动</button>
+          <button class="ghost" @click="openDockTab('hosts')">主机</button>
         </div>
       </header>
 
@@ -2437,15 +2480,15 @@ onBeforeUnmount(() => {
         <section class="panel terminal-panel shell-panel">
           <div class="panel-head">
             <div>
-              <p class="eyebrow">Terminal Workspace</p>
-              <h2>{{ activeTerminalName || selectedSession?.name || 'Ready To Connect' }}</h2>
+              <p class="eyebrow">终端工作区</p>
+              <h2>{{ activeTerminalName || selectedSession?.name || '等待连接' }}</h2>
               <p class="subcopy">
-                {{ activeTerminalId ? `Attached to ${activeTerminalName}` : 'Choose a bookmark and connect to open a live terminal.' }}
+                {{ activeTerminalId ? `当前已连接到 ${activeTerminalName}` : '选择一个书签并连接后，就会在这里打开实时终端。' }}
               </p>
             </div>
 
             <div class="terminal-meta">
-              <span class="status-pill" :data-state="terminalStatus.toLowerCase()">{{ terminalStatus }}</span>
+              <span class="status-pill" :data-state="terminalStatus.toLowerCase()">{{ terminalStatusLabel(terminalStatus) }}</span>
               <span class="badge">{{ selectedSessionAuthLabel }}</span>
               <span v-if="selectedSession" class="badge">{{ selectedSessionTagSummary }}</span>
             </div>
@@ -2465,13 +2508,13 @@ onBeforeUnmount(() => {
             <div class="actions">
               <label class="checkbox-row">
                 <input v-model="rememberSecret" type="checkbox" />
-                <span>Remember in system keychain</span>
+                <span>保存到系统钥匙串</span>
               </label>
               <button class="ghost" :disabled="!selectedSessionId || !connectSecret.trim()" @click="saveCurrentSecret">
-                Save Secret
+                保存凭据
               </button>
               <button class="ghost danger" :disabled="!selectedSessionId" @click="forgetSavedSecret">
-                Forget
+                忘记凭据
               </button>
             </div>
           </div>
@@ -2481,37 +2524,36 @@ onBeforeUnmount(() => {
 
             <div v-if="!activeTerminalId" class="terminal-overlay">
               <div class="terminal-empty">
-                <p class="eyebrow">Connection Hub</p>
-                <h3>{{ selectedSession?.name || 'No session selected' }}</h3>
+                <p class="eyebrow">连接中心</p>
+                <h3>{{ selectedSession?.name || '尚未选择会话' }}</h3>
                 <p>
-                  This screen now follows the MobaXterm flow: select a bookmark, connect, then work from the
-                  docked SSH browser on the right.
+                  当前界面按终端优先的工作流组织：左侧选会话，点击连接，中间跑终端，右侧处理文件浏览和编辑。
                 </p>
 
                 <div class="actions">
                   <button class="primary" :disabled="busy || !selectedSessionId" @click="connectTerminal">
-                    Connect Selected Session
+                    连接当前会话
                   </button>
-                  <button class="ghost" :disabled="busy" @click="saveAndConnectSession">Save & Connect</button>
-                  <button class="ghost" @click="openDockTab('browser')">Open SSH Browser</button>
+                  <button class="ghost" :disabled="busy" @click="saveAndConnectSession">保存并连接</button>
+                  <button class="ghost" @click="openDockTab('browser')">打开 SSH 浏览器</button>
                 </div>
 
                 <div class="summary-grid">
                   <div class="summary-card">
                     <strong>{{ sessions.length }}</strong>
-                    <span>Saved sessions</span>
+                    <span>已保存会话</span>
                   </div>
                   <div class="summary-card">
                     <strong>{{ queuedTransferCount }}</strong>
-                    <span>Queued transfers</span>
+                    <span>排队任务</span>
                   </div>
                   <div class="summary-card">
                     <strong>{{ knownHosts.length }}</strong>
-                    <span>known_hosts entries</span>
+                    <span>known_hosts 记录</span>
                   </div>
                   <div class="summary-card">
                     <strong>{{ selectedSessionRemoteRoot }}</strong>
-                    <span>Primary remote root</span>
+                    <span>主远程目录</span>
                   </div>
                 </div>
               </div>
@@ -2520,20 +2562,20 @@ onBeforeUnmount(() => {
 
           <div class="terminal-footer terminal-footer--cards">
             <div class="terminal-foot-card">
-              <strong>Connection Target</strong>
+              <strong>连接目标</strong>
               <p>{{ selectedSessionSummary }}</p>
             </div>
             <div class="terminal-foot-card">
-              <strong>Remote Root</strong>
+              <strong>远程根目录</strong>
               <p>{{ selectedSessionRemoteRoot }}</p>
             </div>
             <div class="terminal-foot-card">
-              <strong>Queue State</strong>
-              <p>{{ runningTransferCount }} running · {{ queuedTransferCount }} queued · {{ failedTransferCount }} failed</p>
+              <strong>队列状态</strong>
+              <p>{{ runningTransferCount }} 个执行中 · {{ queuedTransferCount }} 个排队中 · {{ failedTransferCount }} 个失败</p>
             </div>
             <div class="terminal-foot-card">
-              <strong>Terminal Tabs</strong>
-              <p>{{ terminalTabs.length }} open · {{ orderedTerminalTabs.filter((tab) => tab.status === 'Connected').length }} connected</p>
+              <strong>终端标签</strong>
+              <p>{{ terminalTabs.length }} 个已打开 · {{ orderedTerminalTabs.filter((tab) => tab.status === 'Connected').length }} 个已连接</p>
             </div>
           </div>
         </section>
@@ -2554,34 +2596,34 @@ onBeforeUnmount(() => {
           <div v-if="activeDockTab === 'browser'" class="dock-pane">
             <div class="panel-head panel-head--tight">
               <div>
-                <p class="eyebrow">SSH Browser</p>
-                <h2>Remote Files</h2>
+                <p class="eyebrow">SSH 浏览器</p>
+                <h2>远程文件</h2>
               </div>
               <div class="actions">
                 <button class="ghost" :disabled="!selectedRemotePaths.length" @click="clearRemoteSelection">
-                  Clear
+                  清空选择
                 </button>
-                <button class="ghost" :disabled="sftpBusy" @click="goToParentDirectory">Parent</button>
+                <button class="ghost" :disabled="sftpBusy" @click="goToParentDirectory">上一级</button>
                 <button class="ghost" :disabled="sftpBusy || !selectedSessionId" @click="loadSftpDirectory()">
-                  Refresh
+                  刷新
                 </button>
               </div>
             </div>
 
             <div class="sftp-toolbar">
               <label>
-                <span>Remote Directory</span>
+                <span>远程目录</span>
                 <input v-model="sftpPath" placeholder="/" />
               </label>
               <button class="primary" :disabled="sftpBusy || !selectedSessionId" @click="loadSftpDirectory()">
-                Load
+                加载
               </button>
             </div>
 
             <div class="browser-grid">
               <div class="tree-panel">
                 <div class="section-title">
-                  <span>Directory Tree</span>
+                  <span>目录树</span>
                   <span>{{ visibleRemoteTreeNodes.length }}</span>
                 </div>
                 <button
@@ -2597,13 +2639,13 @@ onBeforeUnmount(() => {
                   <span class="tree-label">{{ node.name }}</span>
                 </button>
                 <p v-if="!visibleRemoteTreeNodes.length" class="empty-copy">
-                  Save at least one remote bookmark to seed the tree, or connect and browse from `/`.
+                  先保存至少一个远程书签，或连接后从 `/` 开始浏览。
                 </p>
               </div>
 
               <div class="sftp-list">
                 <div class="section-title">
-                  <span>Current Directory</span>
+                  <span>当前目录</span>
                   <span>{{ sftpEntries.length }}</span>
                 </div>
                 <button
@@ -2621,89 +2663,89 @@ onBeforeUnmount(() => {
                         @click.stop
                         @change="toggleRemoteSelection(entry)"
                       />
-                      <span>{{ entry.is_dir ? 'DIR' : 'FILE' }}</span>
+                      <span>{{ entry.is_dir ? '目录' : '文件' }}</span>
                     </label>
-                    <small>{{ entry.size ?? 'n/a' }}</small>
+                    <small>{{ entry.size ?? '--' }}</small>
                   </div>
                   <strong>{{ entry.name }}</strong>
                   <small>{{ entry.path }}</small>
                 </button>
                 <p v-if="!sftpEntries.length" class="empty-copy">
-                  Connect to a session to make the SFTP panel useful.
+                  先连接到会话，右侧 SFTP 面板才会有内容。
                 </p>
               </div>
             </div>
 
             <div class="dock-form-grid">
               <label>
-                <span>New Directory Path</span>
+                <span>新目录路径</span>
                 <input v-model="sftpCreatePath" placeholder="/tmp/new-folder" />
               </label>
               <label>
-                <span>Remote Path</span>
+                <span>远程路径</span>
                 <input v-model="remoteTransferPath" placeholder="/root/example.txt" />
               </label>
               <label>
-                <span>Rename Target</span>
+                <span>重命名目标</span>
                 <input v-model="sftpRenameTarget" placeholder="/root/example-renamed.txt" />
               </label>
               <label>
-                <span>Local Path</span>
+                <span>本地路径</span>
                 <input v-model="localTransferPath" placeholder="/root/downloads/example.txt" />
               </label>
             </div>
 
             <div class="actions dock-actions">
-              <button class="ghost" :disabled="sftpBusy" @click="createRemoteDirectory">Create Dir</button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="chooseUploadLocalFile">Pick File</button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="chooseDownloadLocalPath">Pick Save Path</button>
-              <button class="ghost" :disabled="sftpBusy" @click="renameRemotePath">Rename</button>
-              <button class="ghost danger" :disabled="sftpBusy" @click="deleteRemotePath">Delete</button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="queueDownloadJob">Queue Download</button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="queueUploadJob">Queue Upload</button>
-              <button class="ghost" :disabled="queueRunning || sftpBusy || !selectedSessionId" @click="batchQueueUploads">Batch Uploads</button>
-              <button class="ghost" :disabled="!selectedRemotePaths.length || sftpBusy" @click="batchQueueDownloads">Batch Downloads</button>
-              <button class="ghost danger" :disabled="!selectedRemotePaths.length || sftpBusy" @click="batchDeleteSelectedRemote">Batch Delete</button>
-              <button class="ghost" :disabled="sftpBusy" @click="downloadSelectedRemoteFile">Download</button>
-              <button class="primary" :disabled="sftpBusy" @click="uploadLocalFile">Upload</button>
+              <button class="ghost" :disabled="sftpBusy" @click="createRemoteDirectory">创建目录</button>
+              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="chooseUploadLocalFile">选择文件</button>
+              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="chooseDownloadLocalPath">选择保存路径</button>
+              <button class="ghost" :disabled="sftpBusy" @click="renameRemotePath">重命名</button>
+              <button class="ghost danger" :disabled="sftpBusy" @click="deleteRemotePath">删除</button>
+              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="queueDownloadJob">加入下载队列</button>
+              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="queueUploadJob">加入上传队列</button>
+              <button class="ghost" :disabled="queueRunning || sftpBusy || !selectedSessionId" @click="batchQueueUploads">批量上传</button>
+              <button class="ghost" :disabled="!selectedRemotePaths.length || sftpBusy" @click="batchQueueDownloads">批量下载</button>
+              <button class="ghost danger" :disabled="!selectedRemotePaths.length || sftpBusy" @click="batchDeleteSelectedRemote">批量删除</button>
+              <button class="ghost" :disabled="sftpBusy" @click="downloadSelectedRemoteFile">下载</button>
+              <button class="primary" :disabled="sftpBusy" @click="uploadLocalFile">上传</button>
             </div>
           </div>
 
           <div v-else-if="activeDockTab === 'editor'" class="dock-pane">
             <div class="panel-head panel-head--tight">
               <div>
-                <p class="eyebrow">Remote Editor</p>
+                <p class="eyebrow">远程编辑器</p>
                 <h2>{{ remoteEditorTitle }}</h2>
               </div>
               <div class="actions">
                 <button class="ghost" :disabled="remoteEditorLoading || !remoteTransferPath" @click="openRemoteTextFile()">
-                  Load
+                  载入
                 </button>
                 <button class="ghost" :disabled="remoteEditorLoading || !remoteEditorPath" @click="openRemoteTextFile(remoteEditorPath)">
-                  Reload
+                  重新载入
                 </button>
                 <button class="primary" :disabled="remoteEditorLoading || !remoteEditorDirty" @click="saveRemoteTextFile">
-                  Save Remote File
+                  保存到远程
                 </button>
               </div>
             </div>
 
             <div class="dock-form-grid">
               <label>
-                <span>Remote Text Path</span>
+                <span>远程文本路径</span>
                 <input v-model="remoteTransferPath" placeholder="/etc/nginx/nginx.conf" />
               </label>
               <label>
-                <span>Editor State</span>
+                <span>编辑状态</span>
                 <input
                   :value="
                     remoteEditorLoading
-                      ? 'Loading…'
+                      ? '加载中…'
                       : remoteEditorPath
                         ? remoteEditorDirty
-                          ? 'Modified'
-                          : 'Synced'
-                        : 'No file loaded'
+                          ? '已修改'
+                          : '已同步'
+                        : '尚未载入文件'
                   "
                   disabled
                 />
@@ -2711,33 +2753,33 @@ onBeforeUnmount(() => {
             </div>
 
             <label class="editor-surface">
-              <span>UTF-8 Text Buffer</span>
+              <span>UTF-8 文本缓冲区</span>
               <textarea
                 v-model="remoteEditorContent"
                 rows="20"
                 :disabled="remoteEditorLoading || !remoteEditorPath"
-                placeholder="Double-click a remote file from the SSH Browser to load it here."
+                placeholder="在 SSH 浏览器里双击一个远程文件，就会加载到这里。"
               />
             </label>
 
             <p class="empty-copy">
-              This inline editor is tuned for config files and scripts. Non-UTF-8 files and large binary assets should still be handled through download/upload.
+              这个内联编辑器主要适合配置文件和脚本。非 UTF-8 文件或较大的二进制文件仍然建议通过下载/上传处理。
             </p>
           </div>
 
           <div v-else-if="activeDockTab === 'queue'" class="dock-pane">
             <div class="panel-head panel-head--tight">
               <div>
-                <p class="eyebrow">Transfer Queue</p>
-                <h2>Ordered Jobs</h2>
+                <p class="eyebrow">传输队列</p>
+                <h2>顺序任务</h2>
               </div>
               <div class="actions">
                 <button class="ghost" :disabled="queueRunning || !transferQueue.length" @click="runTransferQueue">
-                  {{ queueRunning ? 'Running...' : 'Run Queue' }}
+                  {{ queueRunning ? '运行中...' : '运行队列' }}
                 </button>
-                <button class="ghost" :disabled="!queueRunning" @click="requestQueueStop">Stop After Current</button>
+                <button class="ghost" :disabled="!queueRunning" @click="requestQueueStop">当前任务后停止</button>
                 <button class="ghost" :disabled="!transferQueue.length" @click="clearCompletedTransfers">
-                  Clear Completed
+                  清理已完成
                 </button>
               </div>
             </div>
@@ -2745,34 +2787,34 @@ onBeforeUnmount(() => {
             <div class="settings-grid">
               <label class="checkbox-row">
                 <input v-model="autoResumeQueue" type="checkbox" @change="persistAutoResumeQueueSetting" />
-                <span>Auto resume on launch</span>
+                <span>启动时自动恢复</span>
               </label>
               <label class="checkbox-row">
                 <input v-model="backgroundOnClose" type="checkbox" @change="persistBackgroundOnCloseSetting" />
-                <span>Close to tray</span>
+                <span>关闭时最小化到托盘</span>
               </label>
               <label class="checkbox-row">
                 <input v-model="enableNotifications" type="checkbox" @change="persistNotificationSetting" />
-                <span>System notifications</span>
+                <span>系统通知</span>
               </label>
               <label class="checkbox-row">
                 <input v-model="autoRetryTransfers" type="checkbox" @change="persistAutoRetrySettings" />
-                <span>Auto retry transient failures</span>
+                <span>瞬时失败自动重试</span>
               </label>
               <label class="checkbox-row">
                 <input v-model="autoRemoveSuccessfulJobs" type="checkbox" @change="persistTransferBehaviorSettings" />
-                <span>Auto remove successful jobs</span>
+                <span>自动移除成功任务</span>
               </label>
               <label>
-                <span>Retries</span>
+                <span>重试次数</span>
                 <input v-model="defaultMaxRetries" type="number" min="0" max="9" @change="persistAutoRetrySettings" />
               </label>
               <label>
-                <span>Base Delay</span>
+                <span>基础延迟</span>
                 <input v-model="retryBaseDelaySeconds" type="number" min="1" max="60" @change="persistTransferBehaviorSettings" />
               </label>
               <label>
-                <span>Max Delay</span>
+                <span>最大延迟</span>
                 <input v-model="retryMaxDelaySeconds" type="number" min="1" max="300" @change="persistTransferBehaviorSettings" />
               </label>
             </div>
@@ -2780,12 +2822,12 @@ onBeforeUnmount(() => {
             <div v-if="transferQueue.length" class="queue-list">
               <div v-for="job in transferQueue" :key="job.id" class="queue-item">
                 <div class="queue-item-head">
-                  <strong>{{ job.kind.toUpperCase() }}</strong>
-                  <span class="badge">{{ job.status }}</span>
+                  <strong>{{ transferKindLabel(job.kind) }}</strong>
+                  <span class="badge">{{ transferStatusLabel(job.status) }}</span>
                 </div>
                 <span>{{ job.remotePath }}</span>
                 <small>{{ job.localPath }}</small>
-                <small>attempt {{ job.attemptCount }}/{{ job.maxRetries + 1 }}</small>
+                <small>第 {{ job.attemptCount }} / {{ job.maxRetries + 1 }} 次尝试</small>
                 <small>{{ job.message }}</small>
                 <div v-if="job.status === 'running'" class="queue-progress">
                   <div
@@ -2795,60 +2837,60 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="actions">
                   <button class="ghost" :disabled="job.status === 'running'" @click="retryTransferJob(job.id)">
-                    Retry
+                    重试
                   </button>
                   <button class="ghost danger" :disabled="job.status !== 'running'" @click="cancelRunningTransfer(job.id)">
-                    Cancel
+                    取消
                   </button>
                   <button class="ghost danger" :disabled="job.status === 'running'" @click="removeTransferJob(job.id)">
-                    Remove
+                    移除
                   </button>
                 </div>
               </div>
             </div>
             <p v-else class="empty-copy">
-              Queue uploads and downloads here to process them in order, like a docked transfer pane.
+              上传和下载任务会在这里按顺序执行，作为右侧停靠的传输面板。
             </p>
           </div>
 
           <div v-else-if="activeDockTab === 'activity'" class="dock-pane">
             <div class="panel-head panel-head--tight">
               <div>
-                <p class="eyebrow">Transfer Activity</p>
-                <h2>Recent Events</h2>
+                <p class="eyebrow">传输活动</p>
+                <h2>最近事件</h2>
               </div>
               <div class="actions">
-                <button class="ghost" @click="loadTransferEvents">Refresh</button>
+                <button class="ghost" @click="loadTransferEvents">刷新</button>
                 <button class="ghost danger" :disabled="!transferEvents.length" @click="clearTransferEvents">
-                  Clear Log
+                  清空日志
                 </button>
               </div>
             </div>
 
             <div class="settings-grid">
               <label>
-                <span>Search</span>
-                <input v-model="transferEventQuery" placeholder="job id, message, session id" />
+                <span>搜索</span>
+                <input v-model="transferEventQuery" placeholder="任务 ID、消息、会话 ID" />
               </label>
               <label>
-                <span>Level</span>
+                <span>级别</span>
                 <select v-model="transferEventLevelFilter">
-                  <option value="all">All</option>
-                  <option value="info">Info</option>
-                  <option value="warning">Warning</option>
-                  <option value="error">Error</option>
+                  <option value="all">全部</option>
+                  <option value="info">信息</option>
+                  <option value="warning">警告</option>
+                  <option value="error">错误</option>
                 </select>
               </label>
             </div>
 
             <div class="known-hosts-list">
               <div v-for="event in visibleTransferEvents" :key="event.id" class="known-host-entry">
-                <strong>{{ event.level.toUpperCase() }} · {{ event.job_id }}</strong>
+                <strong>{{ transferLevelLabel(event.level) }} · {{ event.job_id }}</strong>
                 <span>{{ event.message }}</span>
                 <small>{{ formatTimestamp(event.created_at) }}</small>
               </div>
               <p v-if="!visibleTransferEvents.length" class="empty-copy">
-                No transfer events recorded yet.
+                还没有传输事件记录。
               </p>
             </div>
           </div>
@@ -2856,13 +2898,13 @@ onBeforeUnmount(() => {
           <div v-else class="dock-pane">
             <div class="panel-head panel-head--tight">
               <div>
-                <p class="eyebrow">Host Trust</p>
+                <p class="eyebrow">主机信任</p>
                 <h2>known_hosts</h2>
               </div>
               <div class="actions">
-                <button class="ghost" @click="loadKnownHosts">Refresh</button>
+                <button class="ghost" @click="loadKnownHosts">刷新</button>
                 <button class="ghost danger" :disabled="!selectedSessionId" @click="forgetSelectedSessionKnownHost">
-                  Forget Selected Host
+                  忘记当前主机
                 </button>
               </div>
             </div>
@@ -2871,13 +2913,13 @@ onBeforeUnmount(() => {
               <div v-for="entry in knownHosts" :key="entry.line" class="known-host-entry">
                 <strong>#{{ entry.line }} · {{ entry.key_type }}</strong>
                 <span>{{ entry.hosts }}</span>
-                <small>{{ entry.hashed ? 'Hashed host pattern' : 'Plain host pattern' }}</small>
+                <small>{{ entry.hashed ? '已哈希主机模式' : '明文主机模式' }}</small>
                 <div class="actions">
-                  <button class="ghost danger" @click="removeKnownHostLine(entry)">Remove</button>
+                  <button class="ghost danger" @click="removeKnownHostLine(entry)">删除</button>
                 </div>
               </div>
               <p v-if="!knownHosts.length" class="empty-copy">
-                No known_hosts entries found for this user yet.
+                当前用户还没有 known_hosts 记录。
               </p>
             </div>
           </div>
@@ -2886,8 +2928,8 @@ onBeforeUnmount(() => {
 
       <footer class="status-bar">
         <span>{{ statusLine }}</span>
-        <span>{{ selectedSession ? `Selected ${selectedSession.name}` : 'No saved session selected' }}</span>
-        <span>{{ runningTransferCount }} running · {{ queuedTransferCount }} queued · {{ failedTransferCount }} failed</span>
+        <span>{{ selectedSession ? `当前会话：${selectedSession.name}` : '尚未选择已保存会话' }}</span>
+        <span>{{ runningTransferCount }} 个执行中 · {{ queuedTransferCount }} 个排队中 · {{ failedTransferCount }} 个失败</span>
       </footer>
     </main>
   </div>
