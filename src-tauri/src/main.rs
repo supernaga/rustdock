@@ -9,8 +9,9 @@ use rustdock_core::domain::{
 use rustdock_core::runtime::AppRuntime;
 use rustdock_core::sftp::{
     create_remote_dir, delete_remote_path, download_remote_file, list_remote_dir, rename_remote_path,
-    upload_local_file, MutationResult, RemoteDirectoryListing, TransferProgress, TransferResult,
-    download_remote_file_with_progress, upload_local_file_with_progress,
+    upload_local_file, write_remote_text_file, read_remote_text_file, MutationResult, RemoteDirectoryListing,
+    RemoteTextFile, TransferProgress, TransferResult, download_remote_file_with_progress,
+    upload_local_file_with_progress,
 };
 use rustdock_core::ssh::{
     RusshSessionService, SessionController, SessionEvent, SessionService, SessionStatus,
@@ -134,6 +135,21 @@ struct RemoteDeletePayload {
     session_id: String,
     remote_path: String,
     is_dir: bool,
+    secret: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RemoteTextReadPayload {
+    session_id: String,
+    remote_path: String,
+    secret: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RemoteTextWritePayload {
+    session_id: String,
+    remote_path: String,
+    content: String,
     secret: Option<String>,
 }
 
@@ -570,6 +586,34 @@ async fn delete_sftp_path(
 }
 
 #[tauri::command]
+async fn read_remote_text(
+    state: tauri::State<'_, AppState>,
+    request: RemoteTextReadPayload,
+) -> Result<RemoteTextFile, String> {
+    let Some(session) = state.store.find_session(&request.session_id)? else {
+        return Err("Session not found".to_string());
+    };
+
+    read_remote_text_file(session, request.remote_path, request.secret)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn write_remote_text(
+    state: tauri::State<'_, AppState>,
+    request: RemoteTextWritePayload,
+) -> Result<MutationResult, String> {
+    let Some(session) = state.store.find_session(&request.session_id)? else {
+        return Err("Session not found".to_string());
+    };
+
+    write_remote_text_file(session, request.remote_path, request.content, request.secret)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn start_sftp_transfer(
     state: tauri::State<'_, AppState>,
     request: TransferStartPayload,
@@ -814,6 +858,8 @@ fn main() {
             create_sftp_dir,
             rename_sftp_path,
             delete_sftp_path,
+            read_remote_text,
+            write_remote_text,
             start_sftp_transfer,
             cancel_sftp_transfer
         ])

@@ -2,7 +2,7 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { FitAddon as XTermFitAddon } from '@xterm/addon-fit'
 import type { Terminal as XTermTerminal } from 'xterm'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 type SessionSyncState = 'LocalOnly' | 'PendingUpload' | 'Synced' | 'Conflict'
 type SessionStatus = 'Idle' | 'Connecting' | 'Connected' | 'Disconnected' | 'Failed'
@@ -114,12 +114,47 @@ interface RemoteContextTarget {
 type TransferJobStatus = 'queued' | 'running' | 'success' | 'error'
 type TransferJobKind = 'upload' | 'download'
 type TransferEventLevel = 'info' | 'warning' | 'error'
+type DockTab = 'browser' | 'editor' | 'queue' | 'activity' | 'hosts'
 type TransferChannelMessage =
   | { kind: 'started'; job_id: string }
   | { kind: 'progress'; job_id: string; transferred: number; total: number | null }
   | { kind: 'completed'; job_id: string; bytes: number; path: string }
   | { kind: 'failed'; job_id: string; error: string }
   | { kind: 'cancelled'; job_id: string }
+
+interface RemoteTextFilePayload {
+  path: string
+  content: string
+  bytes: number
+}
+
+interface TerminalTab {
+  sessionId: string
+  sessionName: string
+  status: SessionStatus
+  buffer: string
+  unread: number
+  connectedAt: number
+}
+
+interface SessionWorkspaceState {
+  connectSecret: string
+  rememberSecret: boolean
+  secretHydrated: boolean
+  sftpPath: string
+  sftpEntries: RemoteDirEntry[]
+  remoteTreeRoots: RemoteTreeNode[]
+  remoteTransferPath: string
+  localTransferPath: string
+  remoteTransferIsDir: boolean
+  selectedRemotePaths: string[]
+  sftpCreatePath: string
+  sftpRenameTarget: string
+  remoteEditorPath: string
+  remoteEditorContent: string
+  remoteEditorOriginalContent: string
+  activeDockTab: DockTab
+}
 
 interface TransferJob {
   id: string
@@ -205,6 +240,14 @@ const backgroundOnClose = ref(true)
 const autoRemoveSuccessfulJobs = ref(false)
 const retryBaseDelaySeconds = ref(2)
 const retryMaxDelaySeconds = ref(20)
+const sessionFilter = ref('')
+const activeDockTab = ref<DockTab>('browser')
+const terminalTabs = ref<TerminalTab[]>([])
+const remoteEditorPath = ref('')
+const remoteEditorContent = ref('')
+const remoteEditorOriginalContent = ref('')
+const remoteEditorLoading = ref(false)
+const sessionWorkspace = ref<Record<string, SessionWorkspaceState>>({})
 const remoteContextMenu = ref<{ x: number; y: number; target: RemoteContextTarget } | null>(null)
 const AUTO_RESUME_QUEUE_KEY = 'rustdock.auto-resume-queue'
 const AUTO_RETRY_TRANSFERS_KEY = 'rustdock.auto-retry-transfers'
@@ -220,10 +263,43 @@ const form = ref<SessionFormState>(newDraft())
 let terminal: XTermTerminal | null = null
 let fitAddon: XTermFitAddon | null = null
 let resizeHandler: (() => void) | null = null
+const dockTabs: Array<{ id: DockTab; label: string }> = [
+  { id: 'browser', label: 'SSH Browser' },
+  { id: 'editor', label: 'Editor' },
+  { id: 'queue', label: 'Transfer Queue' },
+  { id: 'activity', label: 'Activity' },
+  { id: 'hosts', label: 'known_hosts' }
+]
 
 const selectedSession = computed(() =>
   sessions.value.find((session) => session.id === selectedSessionId.value) ?? null
 )
+
+const filteredSessions = computed(() => {
+  const query = sessionFilter.value.trim().toLowerCase()
+  const sorted = [...sessions.value].sort((left, right) => {
+    const leftStamp = left.last_connected_at ?? left.updated_at
+    const rightStamp = right.last_connected_at ?? right.updated_at
+    return rightStamp - leftStamp
+  })
+
+  if (!query) {
+    return sorted
+  }
+
+  return sorted.filter((session) => {
+    const haystack = [
+      session.name,
+      session.host,
+      session.username,
+      session.tags.join(' '),
+      syncLabel(session.sync_state)
+    ]
+      .join(' ')
+      .toLowerCase()
+    return haystack.includes(query)
+  })
+})
 
 const visibleRemoteTreeNodes = computed(() => flattenRemoteTree(remoteTreeRoots.value))
 const filteredTransferEvents = computed(() =>
@@ -238,6 +314,56 @@ const filteredTransferEvents = computed(() =>
       event.session_id.toLowerCase().includes(query)
     return levelMatches && queryMatches
   })
+)
+
+const visibleTransferEvents = computed(() => filteredTransferEvents.value.slice(0, 14))
+const activeTerminalTab = computed(() =>
+  terminalTabs.value.find((tab) => tab.sessionId === activeTerminalId.value) ?? null
+)
+const orderedTerminalTabs = computed(() =>
+  [...terminalTabs.value].sort((left, right) => right.connectedAt - left.connectedAt)
+)
+const queuedTransferCount = computed(
+  () => transferQueue.value.filter((job) => job.status === 'queued').length
+)
+const runningTransferCount = computed(
+  () => transferQueue.value.filter((job) => job.status === 'running').length
+)
+const failedTransferCount = computed(
+  () => transferQueue.value.filter((job) => job.status === 'error').length
+)
+const selectedSessionSummary = computed(() => {
+  if (!selectedSession.value) {
+    return 'Select a saved session or build a draft in the left rail.'
+  }
+  return `${selectedSession.value.username}@${selectedSession.value.host}:${selectedSession.value.port}`
+})
+const selectedSessionRemoteRoot = computed(
+  () => selectedSession.value?.remote_roots[0]?.trim() || '/'
+)
+const selectedSessionAuthLabel = computed(() => {
+  if (!selectedSession.value) {
+    return 'No auth selected'
+  }
+  if (selectedSession.value.auth_method === 'Password') {
+    return 'Password auth'
+  }
+  if (selectedSession.value.auth_method === 'Agent') {
+    return 'SSH agent'
+  }
+  return `Key ${basename(selectedSession.value.auth_method.PrivateKey.path)}`
+})
+const selectedSessionTagSummary = computed(() => {
+  if (!selectedSession.value?.tags.length) {
+    return 'No tags'
+  }
+  return selectedSession.value.tags.join(' · ')
+})
+const remoteEditorDirty = computed(
+  () => remoteEditorPath.value.length > 0 && remoteEditorContent.value !== remoteEditorOriginalContent.value
+)
+const remoteEditorTitle = computed(() =>
+  remoteEditorPath.value ? basename(remoteEditorPath.value) : 'No file open'
 )
 
 const secretPrompt = computed(() => {
@@ -290,21 +416,6 @@ async function loadTransferEvents() {
   }
 }
 
-async function loadSavedSecret(sessionId: string) {
-  try {
-    const secret = await invoke<string | null>('load_session_secret', { sessionId })
-    if (secret) {
-      connectSecret.value = secret
-      rememberSecret.value = true
-    } else {
-      connectSecret.value = ''
-      rememberSecret.value = false
-    }
-  } catch (error) {
-    statusLine.value = renderError(error)
-  }
-}
-
 async function loadKnownHosts() {
   try {
     knownHosts.value = await invoke<KnownHostEntry[]>('list_known_hosts_entries')
@@ -314,24 +425,285 @@ async function loadKnownHosts() {
 }
 
 function startNewSession() {
+  persistSessionWorkspace()
   selectedSessionId.value = null
   form.value = newDraft()
+  sftpPath.value = '/'
+  sftpEntries.value = []
   remoteTreeRoots.value = []
+  remoteTransferPath.value = ''
+  localTransferPath.value = ''
+  selectedRemotePaths.value = []
+  sftpCreatePath.value = ''
+  sftpRenameTarget.value = ''
+  remoteEditorPath.value = ''
+  remoteEditorContent.value = ''
+  remoteEditorOriginalContent.value = ''
+  connectSecret.value = ''
+  rememberSecret.value = false
+  activeDockTab.value = 'browser'
   statusLine.value = 'Draft reset.'
 }
 
-function selectSession(session: SessionProfile) {
+async function selectSession(session: SessionProfile) {
+  if (selectedSessionId.value && selectedSessionId.value !== session.id) {
+    persistSessionWorkspace(selectedSessionId.value)
+  }
   selectedSessionId.value = session.id
   form.value = draftFromSession(session)
-  sftpPath.value = session.remote_roots[0] || '/'
-  hydrateRemoteTree(session)
-  sftpEntries.value = []
-  remoteTransferPath.value = ''
-  remoteTransferIsDir.value = false
-  selectedRemotePaths.value = []
-  sftpRenameTarget.value = ''
+  await restoreSessionContext(session)
   statusLine.value = `Selected ${session.name}.`
-  void loadSavedSecret(session.id)
+}
+
+async function connectSessionFromList(session: SessionProfile) {
+  await selectSession(session)
+  await nextTick()
+  await connectTerminal()
+}
+
+function trimTerminalBuffer(buffer: string): string {
+  const maxChars = 200_000
+  if (buffer.length <= maxChars) {
+    return buffer
+  }
+  return buffer.slice(buffer.length - maxChars)
+}
+
+function cloneRemoteEntries(entries: RemoteDirEntry[]): RemoteDirEntry[] {
+  return entries.map((entry) => ({ ...entry }))
+}
+
+function cloneRemoteTreeNodes(nodes: RemoteTreeNode[]): RemoteTreeNode[] {
+  return nodes.map((node) => ({
+    ...node,
+    children: cloneRemoteTreeNodes(node.children)
+  }))
+}
+
+function buildRemoteTreeRoots(session: SessionProfile): RemoteTreeNode[] {
+  const roots = session.remote_roots.length > 0 ? session.remote_roots : ['/']
+  const uniqueRoots = Array.from(new Set(roots.map((root) => root.trim()).filter(Boolean)))
+  return uniqueRoots.map((rootPath) =>
+    makeRemoteTreeNode(rootPath, rootPath === '/' ? '/' : basename(rootPath), 0)
+  )
+}
+
+function defaultWorkspaceState(session: SessionProfile): SessionWorkspaceState {
+  return {
+    connectSecret: '',
+    rememberSecret: false,
+    secretHydrated: false,
+    sftpPath: session.remote_roots[0] || '/',
+    sftpEntries: [],
+    remoteTreeRoots: buildRemoteTreeRoots(session),
+    remoteTransferPath: '',
+    localTransferPath: '',
+    remoteTransferIsDir: false,
+    selectedRemotePaths: [],
+    sftpCreatePath: '',
+    sftpRenameTarget: '',
+    remoteEditorPath: '',
+    remoteEditorContent: '',
+    remoteEditorOriginalContent: '',
+    activeDockTab: 'browser'
+  }
+}
+
+function getWorkspaceState(session: SessionProfile): SessionWorkspaceState {
+  const existing = sessionWorkspace.value[session.id]
+  if (existing) {
+    return existing
+  }
+
+  const created = defaultWorkspaceState(session)
+  sessionWorkspace.value = {
+    ...sessionWorkspace.value,
+    [session.id]: created
+  }
+  return created
+}
+
+function persistSessionWorkspace(sessionId = selectedSessionId.value) {
+  if (!sessionId) {
+    return
+  }
+
+  const session = sessions.value.find((entry) => entry.id === sessionId)
+  if (!session) {
+    return
+  }
+  const existing = sessionWorkspace.value[sessionId]
+  const secretHydrated =
+    connectSecret.value.trim().length > 0 ||
+    rememberSecret.value ||
+    existing?.secretHydrated ||
+    false
+
+  sessionWorkspace.value = {
+    ...sessionWorkspace.value,
+    [sessionId]: {
+      connectSecret: connectSecret.value,
+      rememberSecret: rememberSecret.value,
+      secretHydrated,
+      sftpPath: sftpPath.value,
+      sftpEntries: cloneRemoteEntries(sftpEntries.value),
+      remoteTreeRoots: cloneRemoteTreeNodes(remoteTreeRoots.value),
+      remoteTransferPath: remoteTransferPath.value,
+      localTransferPath: localTransferPath.value,
+      remoteTransferIsDir: remoteTransferIsDir.value,
+      selectedRemotePaths: [...selectedRemotePaths.value],
+      sftpCreatePath: sftpCreatePath.value,
+      sftpRenameTarget: sftpRenameTarget.value,
+      remoteEditorPath: remoteEditorPath.value,
+      remoteEditorContent: remoteEditorContent.value,
+      remoteEditorOriginalContent: remoteEditorOriginalContent.value,
+      activeDockTab: activeDockTab.value
+    }
+  }
+}
+
+function applyWorkspaceState(session: SessionProfile) {
+  const state = getWorkspaceState(session)
+  sftpPath.value = state.sftpPath
+  sftpEntries.value = cloneRemoteEntries(state.sftpEntries)
+  remoteTreeRoots.value = cloneRemoteTreeNodes(state.remoteTreeRoots)
+  remoteTransferPath.value = state.remoteTransferPath
+  localTransferPath.value = state.localTransferPath
+  remoteTransferIsDir.value = state.remoteTransferIsDir
+  selectedRemotePaths.value = [...state.selectedRemotePaths]
+  sftpCreatePath.value = state.sftpCreatePath
+  sftpRenameTarget.value = state.sftpRenameTarget
+  remoteEditorPath.value = state.remoteEditorPath
+  remoteEditorContent.value = state.remoteEditorContent
+  remoteEditorOriginalContent.value = state.remoteEditorOriginalContent
+  connectSecret.value = state.connectSecret
+  rememberSecret.value = state.rememberSecret
+  activeDockTab.value = state.activeDockTab
+}
+
+async function ensureSessionSecret(session: SessionProfile) {
+  const state = getWorkspaceState(session)
+  if (state.secretHydrated) {
+    connectSecret.value = state.connectSecret
+    rememberSecret.value = state.rememberSecret
+    return
+  }
+
+  try {
+    const secret = await invoke<string | null>('load_session_secret', { sessionId: session.id })
+    state.connectSecret = secret || ''
+    state.rememberSecret = Boolean(secret)
+    state.secretHydrated = true
+    sessionWorkspace.value = {
+      ...sessionWorkspace.value,
+      [session.id]: state
+    }
+    connectSecret.value = state.connectSecret
+    rememberSecret.value = state.rememberSecret
+  } catch (error) {
+    statusLine.value = renderError(error)
+  }
+}
+
+async function restoreSessionContext(session: SessionProfile) {
+  applyWorkspaceState(session)
+  await ensureSessionSecret(session)
+}
+
+function findTerminalTab(sessionId: string): TerminalTab | null {
+  return terminalTabs.value.find((tab) => tab.sessionId === sessionId) ?? null
+}
+
+function setTerminalTabStatus(sessionId: string, status: SessionStatus) {
+  const tab = findTerminalTab(sessionId)
+  if (!tab) {
+    return
+  }
+  tab.status = status
+  if (activeTerminalId.value === sessionId) {
+    terminalStatus.value = status
+  }
+}
+
+function appendTerminalOutput(sessionId: string, chunk: string) {
+  const tab = findTerminalTab(sessionId)
+  if (!tab) {
+    return
+  }
+  tab.buffer = trimTerminalBuffer(`${tab.buffer}${chunk}`)
+  if (activeTerminalId.value === sessionId && terminal) {
+    terminal.write(chunk)
+  } else {
+    tab.unread += 1
+  }
+}
+
+function syncTerminalViewport() {
+  if (!terminal) {
+    return
+  }
+  terminal.reset()
+  if (activeTerminalTab.value?.buffer) {
+    terminal.write(activeTerminalTab.value.buffer)
+  }
+  fitAddon?.fit()
+}
+
+async function activateTerminalTab(sessionId: string) {
+  const tab = findTerminalTab(sessionId)
+  if (!tab) {
+    return
+  }
+  if (selectedSessionId.value && selectedSessionId.value !== sessionId) {
+    persistSessionWorkspace(selectedSessionId.value)
+  }
+  activeTerminalId.value = tab.sessionId
+  activeTerminalName.value = tab.sessionName
+  terminalStatus.value = tab.status
+  tab.unread = 0
+  selectedSessionId.value = tab.sessionId
+  const session = sessions.value.find((entry) => entry.id === tab.sessionId)
+  if (session) {
+    form.value = draftFromSession(session)
+    await restoreSessionContext(session)
+  }
+  syncTerminalViewport()
+}
+
+function registerTerminalTab(connection: TerminalConnection): TerminalTab {
+  const existing = findTerminalTab(connection.session_id)
+  if (existing) {
+    existing.sessionName = connection.session_name
+    existing.connectedAt = Date.now()
+    existing.unread = 0
+    return existing
+  }
+
+  const tab: TerminalTab = {
+    sessionId: connection.session_id,
+    sessionName: connection.session_name,
+    status: 'Connecting',
+    buffer: '',
+    unread: 0,
+    connectedAt: Date.now()
+  }
+  terminalTabs.value = [tab, ...terminalTabs.value]
+  return tab
+}
+
+function removeTerminalTab(sessionId: string) {
+  terminalTabs.value = terminalTabs.value.filter((tab) => tab.sessionId !== sessionId)
+  if (activeTerminalId.value === sessionId) {
+    const nextTab = terminalTabs.value[0] ?? null
+    if (nextTab) {
+      void activateTerminalTab(nextTab.sessionId)
+    } else {
+      activeTerminalId.value = null
+      activeTerminalName.value = ''
+      terminalStatus.value = 'Disconnected'
+      syncTerminalViewport()
+    }
+  }
 }
 
 async function saveSession() {
@@ -367,18 +739,28 @@ async function deleteSession() {
 
   busy.value = true
   try {
-    await invoke('delete_session', { sessionId: selectedSessionId.value })
-    if (activeTerminalId.value === selectedSessionId.value) {
-      closeTerminalState()
+    const deletedId = selectedSessionId.value
+    await invoke('delete_session', { sessionId: deletedId })
+    const { [deletedId]: _deletedWorkspace, ...remainingWorkspaces } = sessionWorkspace.value
+    sessionWorkspace.value = remainingWorkspaces
+    removeTerminalTab(deletedId)
+    if (!activeTerminalId.value) {
+      selectedSessionId.value = null
+      form.value = newDraft()
     }
-    selectedSessionId.value = null
-    form.value = newDraft()
     await loadSessions()
     statusLine.value = 'Session deleted.'
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
     busy.value = false
+  }
+}
+
+async function saveAndConnectSession() {
+  await saveSession()
+  if (selectedSessionId.value) {
+    await connectTerminal()
   }
 }
 
@@ -396,9 +778,21 @@ async function connectTerminal() {
   const cols = terminal.cols || 120
   const rows = terminal.rows || 32
 
+  const existingTab = findTerminalTab(selectedSessionId.value)
+  if (existingTab && existingTab.status !== 'Disconnected' && existingTab.status !== 'Failed') {
+    await activateTerminalTab(existingTab.sessionId)
+    activeDockTab.value = 'browser'
+    await loadSftpDirectory(selectedSessionRemoteRoot.value)
+    terminal.focus()
+    statusLine.value = `Switched to ${existingTab.sessionName}.`
+    return
+  }
+  if (existingTab) {
+    removeTerminalTab(existingTab.sessionId)
+  }
+
   busy.value = true
   terminalStatus.value = 'Connecting'
-  terminal.reset()
 
   try {
     if (rememberSecret.value && connectSecret.value.trim()) {
@@ -408,31 +802,35 @@ async function connectTerminal() {
       })
     }
 
+    const sessionId = selectedSessionId.value
+    const fallbackSessionName = selectedSession.value?.name ?? sessionId
     const channel = new Channel<TerminalStreamMessage>()
     channel.onmessage = (message) => {
-      if (!terminal) {
-        return
-      }
       if (message.kind === 'output') {
-        terminal.write(message.data)
+        appendTerminalOutput(sessionId, message.data)
       } else if (message.kind === 'status') {
-        terminalStatus.value = message.status
+        setTerminalTabStatus(sessionId, message.status)
       } else if (message.kind === 'closed') {
-        closeTerminalState()
+        setTerminalTabStatus(sessionId, 'Disconnected')
       }
     }
 
     const connection = await invoke<TerminalConnection>('connect_terminal', {
-      sessionId: selectedSessionId.value,
+      sessionId,
       cols,
       rows,
       secret: connectSecret.value.trim() || null,
       channel
     })
 
-    activeTerminalId.value = connection.session_id
-    activeTerminalName.value = connection.session_name
-    connectSecret.value = ''
+    const tab = registerTerminalTab(connection)
+    tab.status = 'Connecting'
+    if (tab.buffer.length === 0) {
+      tab.buffer = trimTerminalBuffer(`\x1b[1;34m[workspace]\x1b[0m Opening ${fallbackSessionName}\r\n`)
+    }
+    await activateTerminalTab(connection.session_id)
+    activeDockTab.value = 'browser'
+    await loadSftpDirectory(selectedSessionRemoteRoot.value)
     terminal.focus()
     statusLine.value = `Terminal attached to ${connection.session_name}.`
     await loadSessions()
@@ -452,18 +850,38 @@ async function disconnectTerminal() {
   }
 
   try {
-    await invoke('disconnect_terminal', { sessionId: activeTerminalId.value })
-    closeTerminalState()
+    const sessionId = activeTerminalId.value
+    await invoke('disconnect_terminal', { sessionId })
+    removeTerminalTab(sessionId)
     statusLine.value = 'Terminal disconnected.'
   } catch (error) {
     statusLine.value = renderError(error)
   }
 }
 
+async function closeTerminalTab(sessionId: string) {
+  const tab = findTerminalTab(sessionId)
+  if (!tab) {
+    return
+  }
+
+  if (tab.status === 'Connected' || tab.status === 'Connecting') {
+    try {
+      await invoke('disconnect_terminal', { sessionId })
+    } catch {
+      // Best effort close; remove the tab locally even if the backend already dropped it.
+    }
+  }
+
+  removeTerminalTab(sessionId)
+}
+
 function closeTerminalState() {
-  activeTerminalId.value = null
-  activeTerminalName.value = ''
-  terminalStatus.value = 'Disconnected'
+  if (!activeTerminalId.value) {
+    terminalStatus.value = 'Disconnected'
+    return
+  }
+  removeTerminalTab(activeTerminalId.value)
 }
 
 async function loadSftpDirectory(path?: string) {
@@ -492,14 +910,6 @@ async function loadSftpDirectory(path?: string) {
   } finally {
     sftpBusy.value = false
   }
-}
-
-function hydrateRemoteTree(session: SessionProfile) {
-  const roots = session.remote_roots.length > 0 ? session.remote_roots : ['/']
-  const uniqueRoots = Array.from(new Set(roots.map((root) => root.trim()).filter(Boolean)))
-  remoteTreeRoots.value = uniqueRoots.map((rootPath) =>
-    makeRemoteTreeNode(rootPath, rootPath === '/' ? '/' : basename(rootPath), 0)
-  )
 }
 
 function makeRemoteTreeNode(path: string, name: string, depth: number): RemoteTreeNode {
@@ -579,7 +989,8 @@ function openRemoteEntry(entry: RemoteDirEntry) {
   if (!localTransferPath.value) {
     localTransferPath.value = entry.name
   }
-  statusLine.value = `Selected remote file ${entry.path}.`
+  activeDockTab.value = 'editor'
+  void openRemoteTextFile(entry.path)
 }
 
 function selectRemotePathForMutation(entry: RemoteDirEntry) {
@@ -1033,6 +1444,11 @@ async function deleteRemotePath() {
       }
     })
     statusLine.value = `Deleted ${result.path}.`
+    if (remoteEditorPath.value === result.path) {
+      remoteEditorPath.value = ''
+      remoteEditorContent.value = ''
+      remoteEditorOriginalContent.value = ''
+    }
     remoteTransferPath.value = ''
     remoteTransferIsDir.value = false
     sftpRenameTarget.value = ''
@@ -1389,6 +1805,64 @@ async function resolveSecretForSession(sessionId: string): Promise<string | null
   return invoke<string | null>('load_session_secret', { sessionId })
 }
 
+async function openRemoteTextFile(path = remoteTransferPath.value.trim()) {
+  if (!selectedSessionId.value) {
+    statusLine.value = 'Select a saved session first.'
+    return
+  }
+  if (!path) {
+    statusLine.value = 'Select a remote file first.'
+    return
+  }
+
+  remoteEditorLoading.value = true
+  try {
+    const file = await invoke<RemoteTextFilePayload>('read_remote_text', {
+      request: {
+        session_id: selectedSessionId.value,
+        remote_path: path,
+        secret: connectSecret.value.trim() || null
+      }
+    })
+    remoteEditorPath.value = file.path
+    remoteEditorContent.value = file.content
+    remoteEditorOriginalContent.value = file.content
+    remoteTransferPath.value = file.path
+    activeDockTab.value = 'editor'
+    statusLine.value = `Loaded ${file.bytes} bytes from ${file.path}.`
+  } catch (error) {
+    statusLine.value = renderError(error)
+  } finally {
+    remoteEditorLoading.value = false
+  }
+}
+
+async function saveRemoteTextFile() {
+  if (!selectedSessionId.value || !remoteEditorPath.value) {
+    statusLine.value = 'Open a remote text file first.'
+    return
+  }
+
+  remoteEditorLoading.value = true
+  try {
+    await invoke('write_remote_text', {
+      request: {
+        session_id: selectedSessionId.value,
+        remote_path: remoteEditorPath.value,
+        content: remoteEditorContent.value,
+        secret: connectSecret.value.trim() || null
+      }
+    })
+    remoteEditorOriginalContent.value = remoteEditorContent.value
+    statusLine.value = `Saved ${remoteEditorPath.value}.`
+    await loadSftpDirectory(sftpPath.value)
+  } catch (error) {
+    statusLine.value = renderError(error)
+  } finally {
+    remoteEditorLoading.value = false
+  }
+}
+
 async function persistTransferJob(job: TransferJob) {
   await invoke('save_transfer_job', {
     job: toTransferRecord(job)
@@ -1538,6 +2012,37 @@ async function persistBackgroundOnCloseSetting() {
   await invoke('set_background_on_close', { enabled: backgroundOnClose.value })
 }
 
+function openDockTab(tab: DockTab) {
+  activeDockTab.value = tab
+  if (tab === 'editor' && !remoteEditorPath.value && remoteTransferPath.value.trim()) {
+    void openRemoteTextFile()
+  }
+}
+
+watch(
+  [
+    connectSecret,
+    rememberSecret,
+    sftpPath,
+    sftpEntries,
+    remoteTreeRoots,
+    remoteTransferPath,
+    localTransferPath,
+    remoteTransferIsDir,
+    selectedRemotePaths,
+    sftpCreatePath,
+    sftpRenameTarget,
+    remoteEditorPath,
+    remoteEditorContent,
+    remoteEditorOriginalContent,
+    activeDockTab
+  ],
+  () => {
+    persistSessionWorkspace()
+  },
+  { deep: true }
+)
+
 function loadAutoRetrySettings() {
   autoRetryTransfers.value = window.localStorage.getItem(AUTO_RETRY_TRANSFERS_KEY) !== 'false'
   const stored = Number.parseInt(window.localStorage.getItem(DEFAULT_MAX_RETRIES_KEY) || '2', 10)
@@ -1618,6 +2123,13 @@ function joinRemotePath(directory: string, name: string): string {
   return `${directory.replace(/\/$/, '')}/${name}`
 }
 
+function formatTimestamp(timestamp: number | null): string {
+  if (!timestamp) {
+    return 'Never'
+  }
+  return new Date(timestamp * 1000).toLocaleString()
+}
+
 async function dialogOpen(options: Parameters<typeof import('@tauri-apps/plugin-dialog')['open']>[0]) {
   const { open } = await import('@tauri-apps/plugin-dialog')
   return open(options)
@@ -1687,6 +2199,7 @@ async function ensureTerminalRuntime() {
 
   terminal.open(terminalHost.value)
   fitAddon.fit()
+  syncTerminalViewport()
 
   terminal.onData((data) => {
     if (!activeTerminalId.value) {
@@ -1741,54 +2254,77 @@ onBeforeUnmount(() => {
   if (resizeHandler) {
     window.removeEventListener('resize', resizeHandler)
   }
-  if (activeTerminalId.value) {
-    invoke('disconnect_terminal', { sessionId: activeTerminalId.value }).catch(() => undefined)
+  for (const tab of terminalTabs.value) {
+    invoke('disconnect_terminal', { sessionId: tab.sessionId }).catch(() => undefined)
   }
   terminal?.dispose()
 })
 </script>
 
 <template>
-  <div class="shell">
-    <aside class="rail">
-      <div class="brand">
-        <p class="eyebrow">Desktop Control Plane</p>
+  <div class="app-shell">
+    <aside class="left-rail">
+      <div class="brand-block">
+        <p class="eyebrow">MobaXterm-Inspired</p>
         <h1>RustDock</h1>
         <p class="subcopy">
-          Local-first session manager with a Tauri shell and streamed terminal transport.
+          Session bookmarks on the left, terminal in the center, SSH browser docked on demand.
         </p>
       </div>
 
-      <button class="primary" @click="startNewSession">New Session</button>
+      <div class="rail-actions">
+        <button class="primary" @click="startNewSession">New Session</button>
+        <button class="ghost" :disabled="loading" @click="loadSessions">Reload</button>
+      </div>
 
-      <div class="session-list">
+      <label class="search-card">
+        <span>Session Search</span>
+        <input v-model="sessionFilter" placeholder="host, tag, username" />
+      </label>
+
+      <div class="session-directory">
         <div class="section-title">
           <span>Saved Sessions</span>
-          <span>{{ sessions.length }}</span>
+          <span>{{ filteredSessions.length }}</span>
         </div>
+
         <button
-          v-for="session in sessions"
+          v-for="session in filteredSessions"
           :key="session.id"
           class="session-card"
-          :class="{ selected: session.id === selectedSessionId }"
+          :class="{
+            selected: session.id === selectedSessionId,
+            live: session.id === activeTerminalId
+          }"
           @click="selectSession(session)"
+          @dblclick="connectSessionFromList(session)"
         >
-          <strong>{{ session.name }}</strong>
+          <div class="session-card-head">
+            <strong>{{ session.name }}</strong>
+            <span class="badge">{{ session.id === activeTerminalId ? 'Live' : syncLabel(session.sync_state) }}</span>
+          </div>
           <span>{{ session.username }}@{{ session.host }}:{{ session.port }}</span>
-          <span class="badge">{{ syncLabel(session.sync_state) }}</span>
+          <small>
+            {{
+              session.tags.length
+                ? session.tags.join(' · ')
+                : `Last seen ${formatTimestamp(session.last_connected_at)}`
+            }}
+          </small>
         </button>
-      </div>
-    </aside>
 
-    <main class="workspace">
-      <section class="panel">
-        <div class="panel-head">
+        <p v-if="!filteredSessions.length" class="empty-copy">
+          No saved sessions yet. Fill the draft below, save it, then double-click to connect.
+        </p>
+      </div>
+
+      <section class="editor-card">
+        <div class="panel-head panel-head--tight">
           <div>
-            <p class="eyebrow">Session Editor</p>
-            <h2>{{ form.id ? 'Edit Session' : 'Create Session' }}</h2>
+            <p class="eyebrow">Session Draft</p>
+            <h2>{{ form.id ? 'Edit Profile' : 'Quick Connect Draft' }}</h2>
           </div>
           <div class="actions">
-            <button class="ghost" :disabled="busy || loading" @click="loadSessions">Reload</button>
             <button class="ghost danger" :disabled="busy || !selectedSessionId" @click="deleteSession">
               Delete
             </button>
@@ -1796,7 +2332,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="form-grid">
+        <div class="editor-grid">
           <label>
             <span>Name</span>
             <input v-model="form.name" placeholder="Production Bastion" />
@@ -1813,11 +2349,8 @@ onBeforeUnmount(() => {
             <span>Username</span>
             <input v-model="form.username" placeholder="root" />
           </label>
-        </div>
-
-        <div class="form-grid compact">
           <label>
-            <span>Auth Method</span>
+            <span>Auth</span>
             <select v-model="form.authType">
               <option value="private-key">Private key</option>
               <option value="agent">SSH agent</option>
@@ -1825,414 +2358,537 @@ onBeforeUnmount(() => {
             </select>
           </label>
           <label v-if="form.authType === 'private-key'">
-            <span>Private Key Path</span>
+            <span>Key Path</span>
             <input v-model="form.keyPath" placeholder="~/.ssh/id_ed25519" />
           </label>
           <label v-else>
-            <span>Notes</span>
+            <span>Mode</span>
             <input
-              :value="form.authType === 'agent' ? 'Agent-backed session' : 'Password is not persisted in this cut'"
+              :value="form.authType === 'agent' ? 'Agent-backed session' : 'Password stored in memory unless saved'"
               disabled
             />
           </label>
         </div>
 
-        <div class="stack">
+        <div class="stack compact-stack">
           <label>
             <span>Tags</span>
             <input v-model="form.tagsInput" placeholder="prod, ssh, eu-west" />
           </label>
           <label>
-            <span>Notes</span>
-            <textarea v-model="form.notes" rows="4" />
+            <span>Remote Bookmarks</span>
+            <textarea v-model="form.remoteRootsInput" rows="4" placeholder="/home/root&#10;/var/www" />
           </label>
-        </div>
-
-        <div class="form-grid">
           <label>
             <span>Local Bookmarks</span>
-            <textarea v-model="form.localRootsInput" rows="5" placeholder="/srv/app&#10;/var/log" />
+            <textarea v-model="form.localRootsInput" rows="3" placeholder="/srv/app&#10;/var/log" />
           </label>
           <label>
-            <span>Remote Bookmarks</span>
-            <textarea v-model="form.remoteRootsInput" rows="5" placeholder="/home/root&#10;/var/www" />
+            <span>Notes</span>
+            <textarea v-model="form.notes" rows="3" placeholder="Jump host, prod only, key rotation monthly" />
           </label>
         </div>
-      </section>
 
-      <section class="panel terminal-panel">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Live Terminal</p>
-            <h2>{{ activeTerminalName || 'xterm.js viewport' }}</h2>
-          </div>
-          <div class="terminal-meta">
-            <span class="status-pill" :data-state="terminalStatus.toLowerCase()">{{ terminalStatus }}</span>
-            <button class="ghost" :disabled="busy || !selectedSessionId" @click="connectTerminal">Connect</button>
-            <button class="ghost danger" :disabled="!activeTerminalId" @click="disconnectTerminal">
-              Disconnect
-            </button>
-          </div>
-        </div>
-
-        <div class="terminal-auth">
-          <label>
-            <span>{{ secretPrompt }}</span>
-            <input
-              v-model="connectSecret"
-              type="password"
-              autocomplete="off"
-              :placeholder="secretPrompt"
-            />
-          </label>
-          <div class="actions">
-            <label class="checkbox-row">
-              <input v-model="rememberSecret" type="checkbox" />
-              <span>Remember in system keychain</span>
-            </label>
-            <button class="ghost" :disabled="!selectedSessionId || !connectSecret.trim()" @click="saveCurrentSecret">
-              Save Secret
-            </button>
-            <button class="ghost danger" :disabled="!selectedSessionId" @click="forgetSavedSecret">
-              Forget Secret
-            </button>
-          </div>
-          <p>
-            This secret is used only for the current connection attempt and is not saved to SQLite.
-          </p>
-        </div>
-
-        <div ref="terminalHost" class="terminal-host"></div>
-
-        <div class="terminal-footer">
-          <div>
-            <strong>Transport</strong>
-            <p>Tauri Channel stream backed by a real russh SSH session.</p>
-          </div>
-          <div>
-            <strong>Focus model</strong>
-            <p>Keyboard input is captured directly from xterm and forwarded to the backend session.</p>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">SFTP</p>
-            <h2>Remote Browser</h2>
-          </div>
-          <div class="actions">
-            <button class="ghost" :disabled="!selectedRemotePaths.length" @click="clearRemoteSelection">
-              Clear Selection
-            </button>
-            <button class="ghost" :disabled="queueRunning || sftpBusy || !selectedSessionId" @click="batchQueueUploads">
-              Batch Queue Uploads
-            </button>
-            <button class="ghost" :disabled="!selectedRemotePaths.length || sftpBusy" @click="batchQueueDownloads">
-              Batch Queue Downloads
-            </button>
-            <button class="ghost danger" :disabled="!selectedRemotePaths.length || sftpBusy" @click="batchDeleteSelectedRemote">
-              Batch Delete
-            </button>
-            <button class="ghost" :disabled="sftpBusy" @click="goToParentDirectory">Parent</button>
-            <button class="ghost" :disabled="sftpBusy || !selectedSessionId" @click="loadSftpDirectory()">
-              Refresh
-            </button>
-          </div>
-        </div>
-
-        <div class="sftp-toolbar">
-          <label>
-            <span>Remote Directory</span>
-            <input v-model="sftpPath" placeholder="/" />
-          </label>
-          <button class="primary" :disabled="sftpBusy || !selectedSessionId" @click="loadSftpDirectory()">
-            Load Directory
+        <div class="actions actions--spread">
+          <button class="ghost" :disabled="busy || !selectedSessionId" @click="connectTerminal">
+            Connect
+          </button>
+          <button class="primary" :disabled="busy" @click="saveAndConnectSession">
+            Save & Connect
           </button>
         </div>
+      </section>
+    </aside>
 
-        <div class="sftp-grid">
-          <div class="sftp-browser-layout">
-            <div class="tree-panel">
-              <div class="section-title">
-                <span>Directory Tree</span>
-                <span>{{ visibleRemoteTreeNodes.length }}</span>
-              </div>
-              <button
-                v-for="node in visibleRemoteTreeNodes"
-                :key="node.path"
-                class="tree-node"
-                :style="{ paddingLeft: `${12 + node.depth * 18}px` }"
-                @click="openRemoteTreeNode(node)"
-              >
-                <span class="tree-toggle" @click.stop="toggleRemoteTreeNode(node)">
-                  {{ node.loading ? '…' : node.expanded ? '▾' : '▸' }}
-                </span>
-                <span class="tree-label">{{ node.name }}</span>
-              </button>
-              <p v-if="!visibleRemoteTreeNodes.length" class="empty-copy">
-                Save a session with at least one remote root to initialize the tree.
+    <main class="workspace-shell">
+      <header class="topbar">
+        <div class="workspace-tabs">
+          <button class="workspace-tab active">Workbench</button>
+          <button
+            v-for="tab in orderedTerminalTabs"
+            :key="tab.sessionId"
+            class="workspace-tab"
+            :class="{
+              connected: tab.sessionId === activeTerminalId,
+              disconnected: tab.status === 'Disconnected' || tab.status === 'Failed'
+            }"
+            @click="activateTerminalTab(tab.sessionId)"
+          >
+            <span>{{ tab.sessionName }}</span>
+            <small v-if="tab.unread">{{ tab.unread }}</small>
+            <span class="workspace-tab-status">{{ tab.status }}</span>
+            <span class="workspace-tab-close" @click.stop="closeTerminalTab(tab.sessionId)">×</span>
+          </button>
+          <span class="workspace-caption">{{ selectedSessionSummary }}</span>
+        </div>
+
+        <div class="actions toolbar-actions">
+          <button class="ghost" :disabled="busy || !selectedSessionId" @click="connectTerminal">Connect</button>
+          <button class="ghost danger" :disabled="!activeTerminalId" @click="disconnectTerminal">Disconnect</button>
+          <button class="ghost" :disabled="!selectedSessionId" @click="openDockTab('browser')">Browser</button>
+          <button class="ghost" :disabled="!selectedSessionId" @click="openDockTab('editor')">Editor</button>
+          <button class="ghost" @click="openDockTab('queue')">Queue</button>
+          <button class="ghost" @click="openDockTab('activity')">Activity</button>
+          <button class="ghost" @click="openDockTab('hosts')">Hosts</button>
+        </div>
+      </header>
+
+      <section class="workspace-grid">
+        <section class="panel terminal-panel shell-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Terminal Workspace</p>
+              <h2>{{ activeTerminalName || selectedSession?.name || 'Ready To Connect' }}</h2>
+              <p class="subcopy">
+                {{ activeTerminalId ? `Attached to ${activeTerminalName}` : 'Choose a bookmark and connect to open a live terminal.' }}
               </p>
             </div>
 
-            <div class="sftp-list">
-              <div class="section-title">
-                <span>Current Directory</span>
-                <span>{{ sftpEntries.length }}</span>
-              </div>
-              <button
-                v-for="entry in sftpEntries"
-                :key="entry.path"
-                class="sftp-entry"
-                @click="selectRemotePathForMutation(entry)"
-                @dblclick="openRemoteEntry(entry)"
-              >
-                <label class="checkbox-row">
-                  <input
-                    :checked="isRemoteSelected(entry.path)"
-                    type="checkbox"
-                    @click.stop
-                    @change="toggleRemoteSelection(entry)"
-                  />
-                  <span>Select</span>
-                </label>
-                <strong>{{ entry.is_dir ? 'DIR' : 'FILE' }}</strong>
-                <span>{{ entry.name }}</span>
-                <small>{{ entry.path }}</small>
-              </button>
-              <p v-if="!sftpEntries.length" class="empty-copy">
-                Load a directory to browse the remote filesystem.
-              </p>
+            <div class="terminal-meta">
+              <span class="status-pill" :data-state="terminalStatus.toLowerCase()">{{ terminalStatus }}</span>
+              <span class="badge">{{ selectedSessionAuthLabel }}</span>
+              <span v-if="selectedSession" class="badge">{{ selectedSessionTagSummary }}</span>
             </div>
           </div>
 
-          <div class="sftp-transfer">
+          <div class="terminal-auth terminal-auth--toolbar">
             <label>
-              <span>New Directory Path</span>
-              <input v-model="sftpCreatePath" placeholder="/tmp/new-folder" />
-            </label>
-            <button class="ghost" :disabled="sftpBusy" @click="createRemoteDirectory">
-              Create Directory
-            </button>
-
-            <label>
-              <span>Remote Path</span>
-              <input v-model="remoteTransferPath" placeholder="/root/example.txt" />
-            </label>
-            <label>
-              <span>Rename Target</span>
-              <input v-model="sftpRenameTarget" placeholder="/root/example-renamed.txt" />
-            </label>
-            <label>
-              <span>Local Path</span>
-              <input v-model="localTransferPath" placeholder="/root/downloads/example.txt" />
+              <span>{{ secretPrompt }}</span>
+              <input
+                v-model="connectSecret"
+                type="password"
+                autocomplete="off"
+                :placeholder="secretPrompt"
+              />
             </label>
 
             <div class="actions">
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="chooseUploadLocalFile">
-                Pick File
+              <label class="checkbox-row">
+                <input v-model="rememberSecret" type="checkbox" />
+                <span>Remember in system keychain</span>
+              </label>
+              <button class="ghost" :disabled="!selectedSessionId || !connectSecret.trim()" @click="saveCurrentSecret">
+                Save Secret
               </button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="chooseDownloadLocalPath">
-                Pick Save Path
-              </button>
-              <button class="ghost" :disabled="sftpBusy" @click="renameRemotePath">
-                Rename
-              </button>
-              <button class="ghost danger" :disabled="sftpBusy" @click="deleteRemotePath">
-                Delete
-              </button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="queueDownloadJob">
-                Queue Download
-              </button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="queueUploadJob">
-                Queue Upload
-              </button>
-              <button class="ghost" :disabled="sftpBusy" @click="downloadSelectedRemoteFile">
-                Download
-              </button>
-              <button class="primary" :disabled="sftpBusy" @click="uploadLocalFile">
-                Upload
+              <button class="ghost danger" :disabled="!selectedSessionId" @click="forgetSavedSecret">
+                Forget
               </button>
             </div>
+          </div>
 
-            <div class="transfer-queue">
-              <div class="queue-head">
-                <strong>Transfer Queue</strong>
+          <div class="terminal-stack">
+            <div ref="terminalHost" class="terminal-host" :class="{ 'terminal-host--idle': !activeTerminalId }"></div>
+
+            <div v-if="!activeTerminalId" class="terminal-overlay">
+              <div class="terminal-empty">
+                <p class="eyebrow">Connection Hub</p>
+                <h3>{{ selectedSession?.name || 'No session selected' }}</h3>
+                <p>
+                  This screen now follows the MobaXterm flow: select a bookmark, connect, then work from the
+                  docked SSH browser on the right.
+                </p>
+
                 <div class="actions">
-                  <label class="checkbox-row">
-                    <input v-model="autoResumeQueue" type="checkbox" @change="persistAutoResumeQueueSetting" />
-                    <span>Auto resume on launch</span>
-                  </label>
-                  <label class="checkbox-row">
-                    <input v-model="backgroundOnClose" type="checkbox" @change="persistBackgroundOnCloseSetting" />
-                    <span>Close to tray</span>
-                  </label>
-                  <label class="checkbox-row">
-                    <input v-model="enableNotifications" type="checkbox" @change="persistNotificationSetting" />
-                    <span>System notifications</span>
-                  </label>
-                  <label class="checkbox-row">
-                    <input v-model="autoRetryTransfers" type="checkbox" @change="persistAutoRetrySettings" />
-                    <span>Auto retry transient failures</span>
-                  </label>
-                  <label class="checkbox-row">
-                    <input v-model="autoRemoveSuccessfulJobs" type="checkbox" @change="persistTransferBehaviorSettings" />
-                    <span>Auto remove successful jobs</span>
-                  </label>
-                  <label>
-                    <span>Retries</span>
-                    <input
-                      v-model="defaultMaxRetries"
-                      type="number"
-                      min="0"
-                      max="9"
-                      @change="persistAutoRetrySettings"
-                    />
-                  </label>
-                  <label>
-                    <span>Base Delay</span>
-                    <input
-                      v-model="retryBaseDelaySeconds"
-                      type="number"
-                      min="1"
-                      max="60"
-                      @change="persistTransferBehaviorSettings"
-                    />
-                  </label>
-                  <label>
-                    <span>Max Delay</span>
-                    <input
-                      v-model="retryMaxDelaySeconds"
-                      type="number"
-                      min="1"
-                      max="300"
-                      @change="persistTransferBehaviorSettings"
-                    />
-                  </label>
-                  <button class="ghost" :disabled="queueRunning || !transferQueue.length" @click="runTransferQueue">
-                    {{ queueRunning ? 'Running...' : 'Run Queue' }}
+                  <button class="primary" :disabled="busy || !selectedSessionId" @click="connectTerminal">
+                    Connect Selected Session
                   </button>
-                  <button class="ghost" :disabled="!queueRunning" @click="requestQueueStop">
-                    Stop After Current
-                  </button>
-                  <button class="ghost" :disabled="!transferQueue.length" @click="clearCompletedTransfers">
-                    Clear Completed
-                  </button>
+                  <button class="ghost" :disabled="busy" @click="saveAndConnectSession">Save & Connect</button>
+                  <button class="ghost" @click="openDockTab('browser')">Open SSH Browser</button>
                 </div>
+
+                <div class="summary-grid">
+                  <div class="summary-card">
+                    <strong>{{ sessions.length }}</strong>
+                    <span>Saved sessions</span>
+                  </div>
+                  <div class="summary-card">
+                    <strong>{{ queuedTransferCount }}</strong>
+                    <span>Queued transfers</span>
+                  </div>
+                  <div class="summary-card">
+                    <strong>{{ knownHosts.length }}</strong>
+                    <span>known_hosts entries</span>
+                  </div>
+                  <div class="summary-card">
+                    <strong>{{ selectedSessionRemoteRoot }}</strong>
+                    <span>Primary remote root</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="terminal-footer terminal-footer--cards">
+            <div class="terminal-foot-card">
+              <strong>Connection Target</strong>
+              <p>{{ selectedSessionSummary }}</p>
+            </div>
+            <div class="terminal-foot-card">
+              <strong>Remote Root</strong>
+              <p>{{ selectedSessionRemoteRoot }}</p>
+            </div>
+            <div class="terminal-foot-card">
+              <strong>Queue State</strong>
+              <p>{{ runningTransferCount }} running · {{ queuedTransferCount }} queued · {{ failedTransferCount }} failed</p>
+            </div>
+            <div class="terminal-foot-card">
+              <strong>Terminal Tabs</strong>
+              <p>{{ terminalTabs.length }} open · {{ orderedTerminalTabs.filter((tab) => tab.status === 'Connected').length }} connected</p>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel dock-panel">
+          <div class="dock-tabs">
+            <button
+              v-for="tab in dockTabs"
+              :key="tab.id"
+              class="dock-tab"
+              :class="{ active: activeDockTab === tab.id }"
+              @click="openDockTab(tab.id)"
+            >
+              {{ tab.label }}
+            </button>
+          </div>
+
+          <div v-if="activeDockTab === 'browser'" class="dock-pane">
+            <div class="panel-head panel-head--tight">
+              <div>
+                <p class="eyebrow">SSH Browser</p>
+                <h2>Remote Files</h2>
+              </div>
+              <div class="actions">
+                <button class="ghost" :disabled="!selectedRemotePaths.length" @click="clearRemoteSelection">
+                  Clear
+                </button>
+                <button class="ghost" :disabled="sftpBusy" @click="goToParentDirectory">Parent</button>
+                <button class="ghost" :disabled="sftpBusy || !selectedSessionId" @click="loadSftpDirectory()">
+                  Refresh
+                </button>
+              </div>
+            </div>
+
+            <div class="sftp-toolbar">
+              <label>
+                <span>Remote Directory</span>
+                <input v-model="sftpPath" placeholder="/" />
+              </label>
+              <button class="primary" :disabled="sftpBusy || !selectedSessionId" @click="loadSftpDirectory()">
+                Load
+              </button>
+            </div>
+
+            <div class="browser-grid">
+              <div class="tree-panel">
+                <div class="section-title">
+                  <span>Directory Tree</span>
+                  <span>{{ visibleRemoteTreeNodes.length }}</span>
+                </div>
+                <button
+                  v-for="node in visibleRemoteTreeNodes"
+                  :key="node.path"
+                  class="tree-node"
+                  :style="{ paddingLeft: `${12 + node.depth * 16}px` }"
+                  @click="openRemoteTreeNode(node)"
+                >
+                  <span class="tree-toggle" @click.stop="toggleRemoteTreeNode(node)">
+                    {{ node.loading ? '…' : node.expanded ? '▾' : '▸' }}
+                  </span>
+                  <span class="tree-label">{{ node.name }}</span>
+                </button>
+                <p v-if="!visibleRemoteTreeNodes.length" class="empty-copy">
+                  Save at least one remote bookmark to seed the tree, or connect and browse from `/`.
+                </p>
               </div>
 
-              <div v-if="transferQueue.length" class="queue-list">
-                <div v-for="job in transferQueue" :key="job.id" class="queue-item">
-                  <strong>{{ job.kind.toUpperCase() }}</strong>
-                  <span>{{ job.remotePath }}</span>
-                  <small>{{ job.localPath }}</small>
-                  <small>attempt {{ job.attemptCount }}/{{ job.maxRetries + 1 }}</small>
-                  <small>{{ job.status }} · {{ job.message }}</small>
-                  <div v-if="job.status === 'running'" class="queue-progress">
-                    <div
-                      class="queue-progress-bar"
-                      :style="{ width: `${job.total ? Math.min(100, Math.round(((job.transferred ?? 0) / job.total) * 100)) : 15}%` }"
-                    ></div>
-                  </div>
-                  <div class="actions">
-                    <button class="ghost" :disabled="job.status === 'running'" @click="retryTransferJob(job.id)">
-                      Retry
-                    </button>
-                    <button class="ghost danger" :disabled="job.status !== 'running'" @click="cancelRunningTransfer(job.id)">
-                      Cancel
-                    </button>
-                    <button class="ghost danger" :disabled="job.status === 'running'" @click="removeTransferJob(job.id)">
-                      Remove
-                    </button>
-                  </div>
+              <div class="sftp-list">
+                <div class="section-title">
+                  <span>Current Directory</span>
+                  <span>{{ sftpEntries.length }}</span>
                 </div>
+                <button
+                  v-for="entry in sftpEntries"
+                  :key="entry.path"
+                  class="sftp-entry"
+                  @click="selectRemotePathForMutation(entry)"
+                  @dblclick="openRemoteEntry(entry)"
+                >
+                  <div class="sftp-entry-head">
+                    <label class="checkbox-row">
+                      <input
+                        :checked="isRemoteSelected(entry.path)"
+                        type="checkbox"
+                        @click.stop
+                        @change="toggleRemoteSelection(entry)"
+                      />
+                      <span>{{ entry.is_dir ? 'DIR' : 'FILE' }}</span>
+                    </label>
+                    <small>{{ entry.size ?? 'n/a' }}</small>
+                  </div>
+                  <strong>{{ entry.name }}</strong>
+                  <small>{{ entry.path }}</small>
+                </button>
+                <p v-if="!sftpEntries.length" class="empty-copy">
+                  Connect to a session to make the SFTP panel useful.
+                </p>
               </div>
-              <p v-else class="empty-copy">
-                Queue uploads and downloads here to process them in order.
-              </p>
             </div>
+
+            <div class="dock-form-grid">
+              <label>
+                <span>New Directory Path</span>
+                <input v-model="sftpCreatePath" placeholder="/tmp/new-folder" />
+              </label>
+              <label>
+                <span>Remote Path</span>
+                <input v-model="remoteTransferPath" placeholder="/root/example.txt" />
+              </label>
+              <label>
+                <span>Rename Target</span>
+                <input v-model="sftpRenameTarget" placeholder="/root/example-renamed.txt" />
+              </label>
+              <label>
+                <span>Local Path</span>
+                <input v-model="localTransferPath" placeholder="/root/downloads/example.txt" />
+              </label>
+            </div>
+
+            <div class="actions dock-actions">
+              <button class="ghost" :disabled="sftpBusy" @click="createRemoteDirectory">Create Dir</button>
+              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="chooseUploadLocalFile">Pick File</button>
+              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="chooseDownloadLocalPath">Pick Save Path</button>
+              <button class="ghost" :disabled="sftpBusy" @click="renameRemotePath">Rename</button>
+              <button class="ghost danger" :disabled="sftpBusy" @click="deleteRemotePath">Delete</button>
+              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="queueDownloadJob">Queue Download</button>
+              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="queueUploadJob">Queue Upload</button>
+              <button class="ghost" :disabled="queueRunning || sftpBusy || !selectedSessionId" @click="batchQueueUploads">Batch Uploads</button>
+              <button class="ghost" :disabled="!selectedRemotePaths.length || sftpBusy" @click="batchQueueDownloads">Batch Downloads</button>
+              <button class="ghost danger" :disabled="!selectedRemotePaths.length || sftpBusy" @click="batchDeleteSelectedRemote">Batch Delete</button>
+              <button class="ghost" :disabled="sftpBusy" @click="downloadSelectedRemoteFile">Download</button>
+              <button class="primary" :disabled="sftpBusy" @click="uploadLocalFile">Upload</button>
+            </div>
+          </div>
+
+          <div v-else-if="activeDockTab === 'editor'" class="dock-pane">
+            <div class="panel-head panel-head--tight">
+              <div>
+                <p class="eyebrow">Remote Editor</p>
+                <h2>{{ remoteEditorTitle }}</h2>
+              </div>
+              <div class="actions">
+                <button class="ghost" :disabled="remoteEditorLoading || !remoteTransferPath" @click="openRemoteTextFile()">
+                  Load
+                </button>
+                <button class="ghost" :disabled="remoteEditorLoading || !remoteEditorPath" @click="openRemoteTextFile(remoteEditorPath)">
+                  Reload
+                </button>
+                <button class="primary" :disabled="remoteEditorLoading || !remoteEditorDirty" @click="saveRemoteTextFile">
+                  Save Remote File
+                </button>
+              </div>
+            </div>
+
+            <div class="dock-form-grid">
+              <label>
+                <span>Remote Text Path</span>
+                <input v-model="remoteTransferPath" placeholder="/etc/nginx/nginx.conf" />
+              </label>
+              <label>
+                <span>Editor State</span>
+                <input
+                  :value="
+                    remoteEditorLoading
+                      ? 'Loading…'
+                      : remoteEditorPath
+                        ? remoteEditorDirty
+                          ? 'Modified'
+                          : 'Synced'
+                        : 'No file loaded'
+                  "
+                  disabled
+                />
+              </label>
+            </div>
+
+            <label class="editor-surface">
+              <span>UTF-8 Text Buffer</span>
+              <textarea
+                v-model="remoteEditorContent"
+                rows="20"
+                :disabled="remoteEditorLoading || !remoteEditorPath"
+                placeholder="Double-click a remote file from the SSH Browser to load it here."
+              />
+            </label>
 
             <p class="empty-copy">
-              File picker and a basic ordered queue are now in place. Confirmation dialogs and richer progress UI come next.
+              This inline editor is tuned for config files and scripts. Non-UTF-8 files and large binary assets should still be handled through download/upload.
             </p>
           </div>
-        </div>
-      </section>
 
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Transfer Activity</p>
-            <h2>Recent Events</h2>
-          </div>
-          <div class="actions">
-            <label>
-              <span>Search</span>
-              <input v-model="transferEventQuery" placeholder="job id, message, session id" />
-            </label>
-            <label>
-              <span>Level</span>
-              <select v-model="transferEventLevelFilter">
-                <option value="all">All</option>
-                <option value="info">Info</option>
-                <option value="warning">Warning</option>
-                <option value="error">Error</option>
-              </select>
-            </label>
-            <button class="ghost" @click="loadTransferEvents">Refresh</button>
-            <button class="ghost danger" :disabled="!transferEvents.length" @click="clearTransferEvents">
-              Clear Log
-            </button>
-          </div>
-        </div>
+          <div v-else-if="activeDockTab === 'queue'" class="dock-pane">
+            <div class="panel-head panel-head--tight">
+              <div>
+                <p class="eyebrow">Transfer Queue</p>
+                <h2>Ordered Jobs</h2>
+              </div>
+              <div class="actions">
+                <button class="ghost" :disabled="queueRunning || !transferQueue.length" @click="runTransferQueue">
+                  {{ queueRunning ? 'Running...' : 'Run Queue' }}
+                </button>
+                <button class="ghost" :disabled="!queueRunning" @click="requestQueueStop">Stop After Current</button>
+                <button class="ghost" :disabled="!transferQueue.length" @click="clearCompletedTransfers">
+                  Clear Completed
+                </button>
+              </div>
+            </div>
 
-        <div class="known-hosts-list">
-          <div v-for="event in filteredTransferEvents" :key="event.id" class="known-host-entry">
-            <strong>{{ event.level.toUpperCase() }} · {{ event.job_id }}</strong>
-            <span>{{ event.message }}</span>
-            <small>{{ new Date(event.created_at * 1000).toLocaleString() }}</small>
-          </div>
-          <p v-if="!filteredTransferEvents.length" class="empty-copy">
-            No transfer events recorded yet.
-          </p>
-        </div>
-      </section>
+            <div class="settings-grid">
+              <label class="checkbox-row">
+                <input v-model="autoResumeQueue" type="checkbox" @change="persistAutoResumeQueueSetting" />
+                <span>Auto resume on launch</span>
+              </label>
+              <label class="checkbox-row">
+                <input v-model="backgroundOnClose" type="checkbox" @change="persistBackgroundOnCloseSetting" />
+                <span>Close to tray</span>
+              </label>
+              <label class="checkbox-row">
+                <input v-model="enableNotifications" type="checkbox" @change="persistNotificationSetting" />
+                <span>System notifications</span>
+              </label>
+              <label class="checkbox-row">
+                <input v-model="autoRetryTransfers" type="checkbox" @change="persistAutoRetrySettings" />
+                <span>Auto retry transient failures</span>
+              </label>
+              <label class="checkbox-row">
+                <input v-model="autoRemoveSuccessfulJobs" type="checkbox" @change="persistTransferBehaviorSettings" />
+                <span>Auto remove successful jobs</span>
+              </label>
+              <label>
+                <span>Retries</span>
+                <input v-model="defaultMaxRetries" type="number" min="0" max="9" @change="persistAutoRetrySettings" />
+              </label>
+              <label>
+                <span>Base Delay</span>
+                <input v-model="retryBaseDelaySeconds" type="number" min="1" max="60" @change="persistTransferBehaviorSettings" />
+              </label>
+              <label>
+                <span>Max Delay</span>
+                <input v-model="retryMaxDelaySeconds" type="number" min="1" max="300" @change="persistTransferBehaviorSettings" />
+              </label>
+            </div>
 
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Host Trust</p>
-            <h2>known_hosts</h2>
+            <div v-if="transferQueue.length" class="queue-list">
+              <div v-for="job in transferQueue" :key="job.id" class="queue-item">
+                <div class="queue-item-head">
+                  <strong>{{ job.kind.toUpperCase() }}</strong>
+                  <span class="badge">{{ job.status }}</span>
+                </div>
+                <span>{{ job.remotePath }}</span>
+                <small>{{ job.localPath }}</small>
+                <small>attempt {{ job.attemptCount }}/{{ job.maxRetries + 1 }}</small>
+                <small>{{ job.message }}</small>
+                <div v-if="job.status === 'running'" class="queue-progress">
+                  <div
+                    class="queue-progress-bar"
+                    :style="{ width: `${job.total ? Math.min(100, Math.round(((job.transferred ?? 0) / job.total) * 100)) : 15}%` }"
+                  ></div>
+                </div>
+                <div class="actions">
+                  <button class="ghost" :disabled="job.status === 'running'" @click="retryTransferJob(job.id)">
+                    Retry
+                  </button>
+                  <button class="ghost danger" :disabled="job.status !== 'running'" @click="cancelRunningTransfer(job.id)">
+                    Cancel
+                  </button>
+                  <button class="ghost danger" :disabled="job.status === 'running'" @click="removeTransferJob(job.id)">
+                    Remove
+                  </button>
+                </div>
+              </div>
+            </div>
+            <p v-else class="empty-copy">
+              Queue uploads and downloads here to process them in order, like a docked transfer pane.
+            </p>
           </div>
-          <div class="actions">
-            <button class="ghost" @click="loadKnownHosts">Refresh</button>
-            <button class="ghost danger" :disabled="!selectedSessionId" @click="forgetSelectedSessionKnownHost">
-              Forget Selected Host
-            </button>
-          </div>
-        </div>
 
-        <div class="known-hosts-list">
-          <div v-for="entry in knownHosts" :key="entry.line" class="known-host-entry">
-            <strong>#{{ entry.line }} · {{ entry.key_type }}</strong>
-            <span>{{ entry.hosts }}</span>
-            <small>{{ entry.hashed ? 'Hashed host pattern' : 'Plain host pattern' }}</small>
-            <div class="actions">
-              <button class="ghost danger" @click="removeKnownHostLine(entry)">Remove</button>
+          <div v-else-if="activeDockTab === 'activity'" class="dock-pane">
+            <div class="panel-head panel-head--tight">
+              <div>
+                <p class="eyebrow">Transfer Activity</p>
+                <h2>Recent Events</h2>
+              </div>
+              <div class="actions">
+                <button class="ghost" @click="loadTransferEvents">Refresh</button>
+                <button class="ghost danger" :disabled="!transferEvents.length" @click="clearTransferEvents">
+                  Clear Log
+                </button>
+              </div>
+            </div>
+
+            <div class="settings-grid">
+              <label>
+                <span>Search</span>
+                <input v-model="transferEventQuery" placeholder="job id, message, session id" />
+              </label>
+              <label>
+                <span>Level</span>
+                <select v-model="transferEventLevelFilter">
+                  <option value="all">All</option>
+                  <option value="info">Info</option>
+                  <option value="warning">Warning</option>
+                  <option value="error">Error</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="known-hosts-list">
+              <div v-for="event in visibleTransferEvents" :key="event.id" class="known-host-entry">
+                <strong>{{ event.level.toUpperCase() }} · {{ event.job_id }}</strong>
+                <span>{{ event.message }}</span>
+                <small>{{ formatTimestamp(event.created_at) }}</small>
+              </div>
+              <p v-if="!visibleTransferEvents.length" class="empty-copy">
+                No transfer events recorded yet.
+              </p>
             </div>
           </div>
-          <p v-if="!knownHosts.length" class="empty-copy">
-            No known_hosts entries found for this user yet.
-          </p>
-        </div>
-      </section>
-    </main>
 
-    <footer class="status-bar">
-      <span>{{ statusLine }}</span>
-      <span v-if="selectedSession">Selected: {{ selectedSession.name }}</span>
-      <span v-else>No saved session selected.</span>
-    </footer>
+          <div v-else class="dock-pane">
+            <div class="panel-head panel-head--tight">
+              <div>
+                <p class="eyebrow">Host Trust</p>
+                <h2>known_hosts</h2>
+              </div>
+              <div class="actions">
+                <button class="ghost" @click="loadKnownHosts">Refresh</button>
+                <button class="ghost danger" :disabled="!selectedSessionId" @click="forgetSelectedSessionKnownHost">
+                  Forget Selected Host
+                </button>
+              </div>
+            </div>
+
+            <div class="known-hosts-list">
+              <div v-for="entry in knownHosts" :key="entry.line" class="known-host-entry">
+                <strong>#{{ entry.line }} · {{ entry.key_type }}</strong>
+                <span>{{ entry.hosts }}</span>
+                <small>{{ entry.hashed ? 'Hashed host pattern' : 'Plain host pattern' }}</small>
+                <div class="actions">
+                  <button class="ghost danger" @click="removeKnownHostLine(entry)">Remove</button>
+                </div>
+              </div>
+              <p v-if="!knownHosts.length" class="empty-copy">
+                No known_hosts entries found for this user yet.
+              </p>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <footer class="status-bar">
+        <span>{{ statusLine }}</span>
+        <span>{{ selectedSession ? `Selected ${selectedSession.name}` : 'No saved session selected' }}</span>
+        <span>{{ runningTransferCount }} running · {{ queuedTransferCount }} queued · {{ failedTransferCount }} failed</span>
+      </footer>
+    </main>
   </div>
 </template>

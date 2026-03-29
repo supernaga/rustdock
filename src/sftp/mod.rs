@@ -1,6 +1,6 @@
 use crate::domain::SessionProfile;
 use crate::ssh::{connect_authenticated, TrustOnFirstUseHandler};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
 use std::path::Path;
@@ -35,10 +35,19 @@ pub struct MutationResult {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct RemoteTextFile {
+    pub path: String,
+    pub content: String,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct TransferProgress {
     pub transferred: u64,
     pub total: Option<u64>,
 }
+
+const MAX_TEXT_FILE_BYTES: u64 = 1024 * 1024;
 
 pub async fn list_remote_dir(
     profile: SessionProfile,
@@ -191,6 +200,76 @@ pub async fn create_remote_dir(
     sftp.create_dir(&remote_path)
         .await
         .with_context(|| format!("failed to create remote directory {remote_path}"))?;
+
+    Ok(MutationResult { path: remote_path })
+}
+
+pub async fn read_remote_text_file(
+    profile: SessionProfile,
+    remote_path: String,
+    secret: Option<String>,
+) -> Result<RemoteTextFile> {
+    let (sftp, _driver) = open_sftp(profile, secret.as_deref()).await?;
+    let metadata = sftp
+        .metadata(&remote_path)
+        .await
+        .with_context(|| format!("failed to stat remote file {remote_path}"))?;
+    let size = metadata.len();
+    if size > MAX_TEXT_FILE_BYTES {
+        return Err(anyhow!(
+            "remote file {remote_path} is too large for the inline editor ({} bytes > {} bytes)",
+            size,
+            MAX_TEXT_FILE_BYTES
+        ));
+    }
+
+    let mut remote_file = sftp
+        .open(&remote_path)
+        .await
+        .with_context(|| format!("failed to open remote file {remote_path}"))?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    remote_file
+        .read_to_end(&mut bytes)
+        .await
+        .with_context(|| format!("failed to read remote file {remote_path}"))?;
+    let content = String::from_utf8(bytes)
+        .with_context(|| format!("remote file {remote_path} is not valid UTF-8 text"))?;
+
+    Ok(RemoteTextFile {
+        path: remote_path,
+        bytes: content.len(),
+        content,
+    })
+}
+
+pub async fn write_remote_text_file(
+    profile: SessionProfile,
+    remote_path: String,
+    content: String,
+    secret: Option<String>,
+) -> Result<MutationResult> {
+    if content.len() as u64 > MAX_TEXT_FILE_BYTES {
+        return Err(anyhow!(
+            "edited content exceeds the inline editor limit ({} bytes > {} bytes)",
+            content.len(),
+            MAX_TEXT_FILE_BYTES
+        ));
+    }
+
+    let (sftp, _driver) = open_sftp(profile, secret.as_deref()).await?;
+    let mut remote_file = sftp
+        .create(&remote_path)
+        .await
+        .with_context(|| format!("failed to open remote file {remote_path} for writing"))?;
+
+    remote_file
+        .write_all(content.as_bytes())
+        .await
+        .with_context(|| format!("failed to write remote file {remote_path}"))?;
+    remote_file
+        .flush()
+        .await
+        .with_context(|| format!("failed to flush remote file {remote_path}"))?;
 
     Ok(MutationResult { path: remote_path })
 }
