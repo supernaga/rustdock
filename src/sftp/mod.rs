@@ -13,8 +13,6 @@ use tokio::sync::{watch, Mutex};
 
 /// Cached SFTP session entry with creation timestamp for TTL eviction.
 struct CachedSftpEntry {
-    sftp: SftpSession,
-    _driver: tokio::task::JoinHandle<()>,
     created_at: Instant,
 }
 
@@ -42,33 +40,19 @@ impl SftpSessionCache {
     ) -> Result<SftpSession> {
         let session_id = profile.id.clone();
 
-        // Try to reuse cached entry
+        // The russh SFTP session handle is not Clone, so keep only recent activity metadata
+        // here for now and open a fresh session on demand.
         {
             let mut entries = self.entries.lock().await;
-            if let Some(entry) = entries.get(&session_id) {
-                if entry.created_at.elapsed().as_secs() < self.ttl_seconds {
-                    // Validate the cached session is still alive by attempting a trivial operation
-                    if entry.sftp.canonicalize(".").await.is_ok() {
-                        return Ok(entry.sftp.clone());
-                    }
-                }
-                // Expired or dead, remove it
-                entries.remove(&session_id);
-            }
+            entries.retain(|_, entry| entry.created_at.elapsed().as_secs() < self.ttl_seconds);
         }
 
-        // Create new session
-        let (sftp, driver) = open_sftp_raw(profile.clone(), secret).await?;
-        let cached = sftp.clone();
+        let (sftp, _driver) = open_sftp_raw(profile.clone(), secret).await?;
 
         let mut entries = self.entries.lock().await;
-        entries.insert(session_id, CachedSftpEntry {
-            sftp,
-            _driver: driver,
-            created_at: Instant::now(),
-        });
+        entries.insert(session_id, CachedSftpEntry { created_at: Instant::now() });
 
-        Ok(cached)
+        Ok(sftp)
     }
 
     /// Remove a cached session (e.g., on disconnect).
