@@ -221,6 +221,16 @@ textarea {
   padding: 16px;
 }
 
+.draft-secret-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(244, 249, 252, 0.05);
+  margin-bottom: 12px;
+}
+
 .search-card {
   display: grid;
   gap: 8px;

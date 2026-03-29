@@ -365,6 +365,9 @@ const remoteEditorDirty = computed(
 const remoteEditorTitle = computed(() =>
   remoteEditorPath.value ? basename(remoteEditorPath.value) : '未打开文件'
 )
+const editorConnectLabel = computed(() =>
+  form.value.id || selectedSessionId.value ? '保存并连接' : '创建并连接'
+)
 
 const secretPrompt = computed(() => {
   if (!selectedSession.value) {
@@ -2404,13 +2407,29 @@ onBeforeUnmount(() => {
             <span>密钥路径</span>
             <input v-model="form.keyPath" placeholder="~/.ssh/id_ed25519" />
           </label>
-          <label v-else>
+          <label v-else-if="form.authType === 'agent'">
             <span>说明</span>
+            <input :value="'通过 SSH 代理认证'" disabled />
+          </label>
+          <label v-else>
+            <span>连接密码</span>
             <input
-              :value="form.authType === 'agent' ? '通过 SSH 代理认证' : '密码仅保存在内存中，除非你手动保存'"
-              disabled
+              v-model="connectSecret"
+              type="password"
+              autocomplete="off"
+              placeholder="输入 SSH 密码"
             />
           </label>
+        </div>
+
+        <div v-if="form.authType === 'password'" class="draft-secret-panel">
+          <label class="checkbox-row">
+            <input v-model="rememberSecret" type="checkbox" />
+            <span>连接成功前，将密码保存到系统钥匙串</span>
+          </label>
+          <p class="empty-copy">
+            现在可以直接在左侧输入密码，然后点击下方“{{ editorConnectLabel }}”。不需要先去中间区域输入。
+          </p>
         </div>
 
         <div class="stack compact-stack">
@@ -2433,11 +2452,11 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="actions actions--spread">
-          <button class="ghost" :disabled="busy || !selectedSessionId" @click="connectTerminal">
-            连接
+          <button class="ghost" :disabled="busy" @click="saveSession">
+            仅保存
           </button>
           <button class="primary" :disabled="busy" @click="saveAndConnectSession">
-            保存并连接
+            {{ editorConnectLabel }}
           </button>
         </div>
       </section>
