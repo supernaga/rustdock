@@ -791,9 +791,11 @@ async function connectTerminal() {
   if (existingTab && existingTab.status !== 'Disconnected' && existingTab.status !== 'Failed') {
     await activateTerminalTab(existingTab.sessionId)
     activeDockTab.value = 'browser'
-    await loadSftpDirectory(selectedSessionRemoteRoot.value)
+    const sftpLoaded = await loadSftpDirectory(selectedSessionRemoteRoot.value)
     terminal.focus()
-    statusLine.value = `已切换到 ${existingTab.sessionName}。`
+    if (sftpLoaded) {
+      statusLine.value = `已切换到 ${existingTab.sessionName}。`
+    }
     return
   }
   if (existingTab) {
@@ -813,6 +815,7 @@ async function connectTerminal() {
 
     const sessionId = selectedSessionId.value
     const fallbackSessionName = selectedSession.value?.name ?? sessionId
+    const secret = await resolveSecretForSession(sessionId)
     const channel = new Channel<TerminalStreamMessage>()
     channel.onmessage = (message) => {
       if (message.kind === 'output') {
@@ -828,7 +831,7 @@ async function connectTerminal() {
       sessionId,
       cols,
       rows,
-      secret: connectSecret.value.trim() || null,
+      secret,
       channel
     })
 
@@ -839,11 +842,12 @@ async function connectTerminal() {
     }
     await activateTerminalTab(connection.session_id)
     activeDockTab.value = 'browser'
-    await loadSftpDirectory(selectedSessionRemoteRoot.value)
+    const sftpLoaded = await loadSftpDirectory(selectedSessionRemoteRoot.value)
+    const sftpStatus = statusLine.value
     terminal.focus()
-    statusLine.value = `终端已连接到 ${connection.session_name}。`
     await loadSessions()
     await loadKnownHosts()
+    statusLine.value = sftpLoaded ? `终端已连接到 ${connection.session_name}。` : sftpStatus
   } catch (error) {
     terminalStatus.value = 'Failed'
     statusLine.value = renderError(error)
@@ -893,19 +897,21 @@ function closeTerminalState() {
   removeTerminalTab(activeTerminalId.value)
 }
 
-async function loadSftpDirectory(path?: string) {
+async function loadSftpDirectory(path?: string): Promise<boolean> {
   if (!selectedSessionId.value) {
     statusLine.value = '请先选择一个已保存的会话。'
-    return
+    return false
   }
 
   sftpBusy.value = true
   try {
+    const sessionId = selectedSessionId.value
+    const secret = await resolveSecretForSession(sessionId)
     const listing = await invoke<RemoteDirectoryListing>('list_sftp_dir', {
       request: {
-        session_id: selectedSessionId.value,
+        session_id: sessionId,
         path: path ?? sftpPath.value,
-        secret: connectSecret.value.trim() || null
+        secret
       }
     })
     sftpPath.value = listing.directory
@@ -914,8 +920,10 @@ async function loadSftpDirectory(path?: string) {
       listing.entries.some((entry) => entry.path === selectedPath)
     )
     statusLine.value = `已加载 ${listing.directory} 下的 ${listing.entries.length} 个条目。`
+    return true
   } catch (error) {
     statusLine.value = renderError(error)
+    return false
   } finally {
     sftpBusy.value = false
   }
@@ -1049,12 +1057,14 @@ async function downloadSelectedRemoteFile() {
 
   sftpBusy.value = true
   try {
+    const sessionId = selectedSessionId.value
+    const secret = await resolveSecretForSession(sessionId)
     const result = await invoke<TransferResult>('download_sftp_file', {
       request: {
-        session_id: selectedSessionId.value,
+        session_id: sessionId,
         remote_path: remoteTransferPath.value.trim(),
         local_path: localTransferPath.value.trim(),
-        secret: connectSecret.value.trim() || null
+        secret
       }
     })
     statusLine.value = `已下载 ${result.bytes} 字节到 ${result.path}。`
@@ -1077,12 +1087,14 @@ async function uploadLocalFile() {
 
   sftpBusy.value = true
   try {
+    const sessionId = selectedSessionId.value
+    const secret = await resolveSecretForSession(sessionId)
     const result = await invoke<TransferResult>('upload_sftp_file', {
       request: {
-        session_id: selectedSessionId.value,
+        session_id: sessionId,
         local_path: localTransferPath.value.trim(),
         remote_path: remoteTransferPath.value.trim(),
-        secret: connectSecret.value.trim() || null
+        secret
       }
     })
     statusLine.value = `已上传 ${result.bytes} 字节到 ${result.path}。`
@@ -1375,11 +1387,13 @@ async function createRemoteDirectory() {
 
   sftpBusy.value = true
   try {
+    const sessionId = selectedSessionId.value
+    const secret = await resolveSecretForSession(sessionId)
     const result = await invoke<MutationResult>('create_sftp_dir', {
       request: {
-        session_id: selectedSessionId.value,
+        session_id: sessionId,
         remote_path: sftpCreatePath.value.trim(),
-        secret: connectSecret.value.trim() || null
+        secret
       }
     })
     statusLine.value = `已创建目录 ${result.path}。`
@@ -1404,12 +1418,14 @@ async function renameRemotePath() {
 
   sftpBusy.value = true
   try {
+    const sessionId = selectedSessionId.value
+    const secret = await resolveSecretForSession(sessionId)
     const result = await invoke<MutationResult>('rename_sftp_path', {
       request: {
-        session_id: selectedSessionId.value,
+        session_id: sessionId,
         source_path: remoteTransferPath.value.trim(),
         target_path: sftpRenameTarget.value.trim(),
-        secret: connectSecret.value.trim() || null
+        secret
       }
     })
     remoteTransferPath.value = result.path
@@ -1444,12 +1460,14 @@ async function deleteRemotePath() {
 
   sftpBusy.value = true
   try {
+    const sessionId = selectedSessionId.value
+    const secret = await resolveSecretForSession(sessionId)
     const result = await invoke<MutationResult>('delete_sftp_path', {
       request: {
-        session_id: selectedSessionId.value,
+        session_id: sessionId,
         remote_path: remoteTransferPath.value.trim(),
         is_dir: remoteTransferIsDir.value,
-        secret: connectSecret.value.trim() || null
+        secret
       }
     })
     statusLine.value = `已删除 ${result.path}。`
@@ -1575,13 +1593,15 @@ async function batchDeleteSelectedRemote() {
 
   sftpBusy.value = true
   try {
+    const sessionId = selectedSessionId.value
+    const secret = await resolveSecretForSession(sessionId)
     for (const entry of selectedEntries) {
       await invoke('delete_sftp_path', {
         request: {
-          session_id: selectedSessionId.value,
+          session_id: sessionId,
           remote_path: entry.path,
           is_dir: entry.is_dir,
-          secret: connectSecret.value.trim() || null
+          secret
         }
       })
     }
@@ -1854,7 +1874,13 @@ async function resolveSecretForSession(sessionId: string): Promise<string | null
   if (selectedSessionId.value === sessionId && connectSecret.value.trim()) {
     return connectSecret.value.trim()
   }
-  return invoke<string | null>('load_session_secret', { sessionId })
+
+  const secret = await invoke<string | null>('load_session_secret', { sessionId })
+  if (selectedSessionId.value === sessionId) {
+    connectSecret.value = secret || ''
+    rememberSecret.value = Boolean(secret)
+  }
+  return secret
 }
 
 async function openRemoteTextFile(path = remoteTransferPath.value.trim()) {
@@ -1869,11 +1895,13 @@ async function openRemoteTextFile(path = remoteTransferPath.value.trim()) {
 
   remoteEditorLoading.value = true
   try {
+    const sessionId = selectedSessionId.value
+    const secret = await resolveSecretForSession(sessionId)
     const file = await invoke<RemoteTextFilePayload>('read_remote_text', {
       request: {
-        session_id: selectedSessionId.value,
+        session_id: sessionId,
         remote_path: path,
-        secret: connectSecret.value.trim() || null
+        secret
       }
     })
     remoteEditorPath.value = file.path
@@ -1897,12 +1925,14 @@ async function saveRemoteTextFile() {
 
   remoteEditorLoading.value = true
   try {
+    const sessionId = selectedSessionId.value
+    const secret = await resolveSecretForSession(sessionId)
     await invoke('write_remote_text', {
       request: {
-        session_id: selectedSessionId.value,
+        session_id: sessionId,
         remote_path: remoteEditorPath.value,
         content: remoteEditorContent.value,
-        secret: connectSecret.value.trim() || null
+        secret
       }
     })
     remoteEditorOriginalContent.value = remoteEditorContent.value

@@ -39,6 +39,7 @@
 html,
 body,
 #app {
+  height: 100%;
   min-height: 100%;
 }
 
@@ -46,6 +47,7 @@ body {
   margin: 0;
   min-height: 100vh;
   color: var(--ink);
+  overflow: hidden;
 }
 
 button,
@@ -91,14 +93,19 @@ textarea {
 
 #app {
   min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .app-shell {
+  height: 100vh;
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 360px minmax(0, 1fr);
+  grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
   gap: 18px;
   padding: 18px;
+  overflow: hidden;
+  align-items: stretch;
 }
 
 .left-rail,
@@ -118,6 +125,9 @@ textarea {
   gap: 16px;
   padding: 20px;
   min-height: 0;
+  min-width: 0;
+  max-height: calc(100vh - 36px);
+  overflow: auto;
 }
 
 .brand-block h1,
@@ -285,14 +295,19 @@ textarea {
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 14px;
   min-height: 0;
+  min-width: 0;
+  max-height: calc(100vh - 36px);
+  overflow: hidden;
 }
 
 .topbar {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   padding: 14px 18px;
+  min-width: 0;
 }
 
 .workspace-tabs {
@@ -300,6 +315,8 @@ textarea {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  flex: 1 1 320px;
+  flex-wrap: wrap;
 }
 
 .workspace-tab {
@@ -342,9 +359,11 @@ textarea {
 }
 
 .workspace-caption {
+  flex: 1 1 280px;
+  min-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .workspace-grid {
@@ -352,11 +371,15 @@ textarea {
   grid-template-columns: minmax(0, 1.4fr) minmax(420px, 0.95fr);
   gap: 16px;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .panel {
   padding: 18px;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .panel-head {
@@ -409,6 +432,7 @@ label > span {
 .shell-panel {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 .terminal-auth--toolbar {
@@ -422,6 +446,7 @@ label > span {
 .terminal-stack {
   position: relative;
   min-height: 0;
+  overflow: hidden;
 }
 
 .terminal-host {
@@ -489,6 +514,8 @@ label > span {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 14px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .dock-tabs {
@@ -504,10 +531,12 @@ label > span {
 
 .dock-pane {
   min-height: 0;
+  overflow: hidden;
 }
 
 .editor-surface {
   min-height: 0;
+  overflow: hidden;
 }
 
 .editor-surface textarea {
@@ -677,8 +706,20 @@ label > span {
   display: flex;
   justify-content: space-between;
   gap: 14px;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   padding: 12px 18px;
+  min-width: 0;
+}
+
+.status-bar span {
+  min-width: 0;
+}
+
+.toolbar-actions {
+  flex: 1 1 360px;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
 @media (max-width: 1500px) {
@@ -689,15 +730,35 @@ label > span {
   .browser-grid {
     grid-template-columns: 1fr;
   }
+
+  .dock-panel {
+    min-height: 320px;
+  }
 }
 
 @media (max-width: 1180px) {
+  body {
+    overflow: auto;
+  }
+
+  #app {
+    height: auto;
+    overflow: visible;
+  }
+
   .app-shell {
+    height: auto;
     grid-template-columns: 1fr;
+    overflow: visible;
   }
 
   .left-rail {
     grid-template-rows: auto auto auto auto auto;
+    max-height: none;
+  }
+
+  .workspace-shell {
+    max-height: none;
   }
 }
 

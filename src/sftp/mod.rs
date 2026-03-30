@@ -119,8 +119,9 @@ pub async fn list_remote_dir(
 
     for entry in read_dir {
         let name = entry.file_name();
-        let kind = format!("{:?}", entry.file_type());
-        let is_dir = kind == "Directory";
+        let file_type = entry.file_type();
+        let kind = format!("{:?}", file_type);
+        let is_dir = file_type.is_dir();
         let size = if is_dir {
             None
         } else {

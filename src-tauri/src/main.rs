@@ -22,7 +22,9 @@ use std::fs;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::image::Image;
 use tauri::ipc::Channel;
 use tauri::menu::{Menu, MenuItem};
@@ -34,6 +36,7 @@ use tokio::sync::watch;
 use keyring::{Entry, Error as KeyringError};
 
 const SECRET_SERVICE: &str = "rustdock/session-secret";
+const TERMINAL_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 struct AppState {
@@ -431,6 +434,13 @@ fn connect_terminal(
     let size = TerminalSize { cols, rows };
     let active = state.session_service.connect(&session, size, secret)?;
     let (controller, events) = active.split();
+    let buffered_events = match wait_for_terminal_ready(&events) {
+        Ok(events) => events,
+        Err(error) => {
+            let _ = controller.disconnect();
+            return Err(error);
+        }
+    };
 
     let mut updated = session.clone();
     updated.last_connected_at = Some(now_timestamp());
@@ -449,13 +459,17 @@ fn connect_terminal(
     let tracked_id = session_id.clone();
     let controller_for_pump = controller.clone();
     std::thread::spawn(move || {
-        while let Ok(event) = events.recv() {
-            let should_stop = matches!(event, SessionEvent::Closed);
-            if channel.send(map_terminal_event(event)).is_err() {
-                let _ = controller_for_pump.disconnect();
-                break;
+        for event in buffered_events {
+            if forward_terminal_event(&channel, &controller_for_pump, event) {
+                if let Ok(mut registry) = controllers.lock() {
+                    registry.remove(&tracked_id);
+                }
+                return;
             }
-            if should_stop {
+        }
+
+        while let Ok(event) = events.recv() {
+            if forward_terminal_event(&channel, &controller_for_pump, event) {
                 break;
             }
         }
@@ -804,6 +818,90 @@ fn remove_controller(
         .lock()
         .map_err(|_| "controller registry is poisoned".to_string())?;
     Ok(controllers.remove(session_id))
+}
+
+fn wait_for_terminal_ready(
+    events: &std::sync::mpsc::Receiver<SessionEvent>,
+) -> Result<Vec<SessionEvent>, String> {
+    let deadline = Instant::now() + TERMINAL_READY_TIMEOUT;
+    let mut buffered = Vec::new();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Timed out while establishing SSH session".to_string());
+        }
+
+        match events.recv_timeout(remaining) {
+            Ok(event) => {
+                let is_connected = matches!(event, SessionEvent::StatusChanged(SessionStatus::Connected));
+                let is_closed = matches!(event, SessionEvent::Closed);
+                buffered.push(event);
+
+                if is_connected {
+                    return Ok(buffered);
+                }
+
+                if is_closed {
+                    return Err(extract_terminal_startup_error(&buffered));
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Err("Timed out while establishing SSH session".to_string());
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(extract_terminal_startup_error(&buffered));
+            }
+        }
+    }
+}
+
+fn extract_terminal_startup_error(events: &[SessionEvent]) -> String {
+    let output_lines: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::Output(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .flat_map(|text| text.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    for line in output_lines.iter().rev() {
+        if let Some(message) = line.strip_prefix("[error]") {
+            let message = message.trim();
+            if !message.is_empty() {
+                return message.to_string();
+            }
+        }
+    }
+
+    if let Some(line) = output_lines.last() {
+        return (*line).to_string();
+    }
+
+    if events
+        .iter()
+        .any(|event| matches!(event, SessionEvent::StatusChanged(SessionStatus::Failed)))
+    {
+        return "SSH session failed before becoming ready".to_string();
+    }
+
+    "SSH session closed before becoming ready".to_string()
+}
+
+fn forward_terminal_event(
+    channel: &Channel<TerminalStreamMessage>,
+    controller: &SessionController,
+    event: SessionEvent,
+) -> bool {
+    let should_stop = matches!(event, SessionEvent::Closed);
+    if channel.send(map_terminal_event(event)).is_err() {
+        let _ = controller.disconnect();
+        return true;
+    }
+    should_stop
 }
 
 fn main() {
