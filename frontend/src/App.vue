@@ -1,208 +1,44 @@
 <script setup lang="ts">
 import { Channel, invoke } from '@tauri-apps/api/core'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import type { FitAddon as XTermFitAddon } from '@xterm/addon-fit'
 import type { Terminal as XTermTerminal } from '@xterm/xterm'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-
-type SessionSyncState = 'LocalOnly' | 'PendingUpload' | 'Synced' | 'Conflict'
-type SessionStatus = 'Idle' | 'Connecting' | 'Connected' | 'Disconnected' | 'Failed'
-
-type AuthMethod =
-  | 'Password'
-  | 'Agent'
-  | { PrivateKey: { path: string } }
-
-interface SessionProfile {
-  id: string
-  name: string
-  host: string
-  port: number
-  username: string
-  auth_method: AuthMethod
-  tags: string[]
-  notes: string
-  local_roots: string[]
-  remote_roots: string[]
-  created_at: number
-  updated_at: number
-  last_connected_at: number | null
-  sync_state: SessionSyncState
-}
-
-type DraftAuthType = 'password' | 'private-key' | 'agent'
-
-interface SessionDraftPayload {
-  id?: string
-  name: string
-  host: string
-  port: number
-  username: string
-  auth_method:
-    | { type: 'password' }
-    | { type: 'agent' }
-    | { type: 'private-key'; path: string }
-  tags: string[]
-  notes: string
-  local_roots: string[]
-  remote_roots: string[]
-}
-
-interface SessionFormState {
-  id?: string
-  name: string
-  host: string
-  port: string
-  username: string
-  authType: DraftAuthType
-  keyPath: string
-  tagsInput: string
-  notes: string
-  localRootsInput: string
-  remoteRootsInput: string
-}
-
-interface TerminalConnection {
-  session_id: string
-  session_name: string
-}
-
-interface RemoteDirEntry {
-  name: string
-  path: string
-  kind: string
-  is_dir: boolean
-  size: number | null
-}
-
-interface RemoteDirectoryListing {
-  directory: string
-  entries: RemoteDirEntry[]
-}
-
-interface TransferResult {
-  path: string
-  bytes: number
-}
-
-interface MutationResult {
-  path: string
-}
-
-interface KnownHostEntry {
-  line: number
-  hosts: string
-  key_type: string
-  hashed: boolean
-}
-
-interface RemoteTreeNode {
-  path: string
-  name: string
-  depth: number
-  expanded: boolean
-  loaded: boolean
-  loading: boolean
-  children: RemoteTreeNode[]
-}
-
-interface RemoteContextTarget {
-  path: string
-  name: string
-  isDir: boolean
-}
-
-type TransferJobStatus = 'queued' | 'running' | 'success' | 'error'
-type TransferJobKind = 'upload' | 'download'
-type TransferEventLevel = 'info' | 'warning' | 'error'
-type DockTab = 'browser' | 'editor' | 'queue' | 'activity' | 'hosts'
-type TransferChannelMessage =
-  | { kind: 'started'; job_id: string }
-  | { kind: 'progress'; job_id: string; transferred: number; total: number | null }
-  | { kind: 'completed'; job_id: string; bytes: number; path: string }
-  | { kind: 'failed'; job_id: string; error: string }
-  | { kind: 'cancelled'; job_id: string }
-
-interface RemoteTextFilePayload {
-  path: string
-  content: string
-  bytes: number
-}
-
-interface TerminalTab {
-  sessionId: string
-  sessionName: string
-  status: SessionStatus
-  buffer: string
-  unread: number
-  connectedAt: number
-}
-
-interface SessionWorkspaceState {
-  connectSecret: string
-  rememberSecret: boolean
-  secretHydrated: boolean
-  sftpPath: string
-  sftpEntries: RemoteDirEntry[]
-  remoteTreeRoots: RemoteTreeNode[]
-  remoteTransferPath: string
-  localTransferPath: string
-  remoteTransferIsDir: boolean
-  selectedRemotePaths: string[]
-  sftpCreatePath: string
-  sftpRenameTarget: string
-  remoteEditorPath: string
-  remoteEditorContent: string
-  remoteEditorOriginalContent: string
-  activeDockTab: DockTab
-}
-
-interface TransferJob {
-  id: string
-  kind: TransferJobKind
-  sessionId: string
-  localPath: string
-  remotePath: string
-  status: TransferJobStatus
-  message: string
-  bytes?: number
-  transferred?: number
-  total?: number | null
-  attemptCount: number
-  maxRetries: number
-  createdAt: number
-  updatedAt: number
-}
-
-interface TransferJobRecordPayload {
-  id: string
-  session_id: string
-  kind: TransferJobKind
-  local_path: string
-  remote_path: string
-  status: TransferJobStatus
-  message: string
-  bytes?: number
-  transferred?: number
-  total?: number | null
-  attempt_count: number
-  max_retries: number
-  created_at: number
-  updated_at: number
-}
-
-interface TransferEventRecordPayload {
-  id: string
-  job_id: string
-  session_id: string
-  level: TransferEventLevel
-  message: string
-  created_at: number
-}
-
-type TerminalStreamMessage =
-  | { kind: 'status'; status: SessionStatus }
-  | { kind: 'output'; data: string }
-  | { kind: 'closed' }
+import type { ComponentPublicInstance } from 'vue'
+import SessionSidebar from './components/SessionSidebar.vue'
+import TerminalPanel from './components/TerminalPanel.vue'
+import WorkspaceDock from './components/WorkspaceDock.vue'
+import type {
+  AuthMethod,
+  DockTab,
+  DockTabOption,
+  DraftAuthType,
+  KnownHostEntry,
+  LocalPathInspection,
+  MutationResult,
+  RemoteContextTarget,
+  RemoteDirectoryListing,
+  RemoteDirEntry,
+  RemoteTextFilePayload,
+  RemoteTreeNode,
+  SessionDraftPayload,
+  SessionFormState,
+  SessionProfile,
+  SessionStatus,
+  SessionSyncState,
+  SessionWorkspaceState,
+  TerminalConnection,
+  TerminalStreamMessage,
+  TerminalTab,
+  TransferChannelMessage,
+  TransferEventLevel,
+  TransferEventRecordPayload,
+  TransferJob,
+  TransferJobKind,
+  TransferJobRecordPayload,
+  TransferJobStatus,
+  TransferResult
+} from './types'
 
 const sessions = ref<SessionProfile[]>([])
 const selectedSessionId = ref<string | null>(null)
@@ -216,6 +52,7 @@ const activeTerminalName = ref<string>('')
 const connectSecret = ref('')
 const rememberSecret = ref(false)
 const terminalHost = ref<HTMLElement | null>(null)
+const remoteDropZone = ref<HTMLElement | null>(null)
 const sftpPath = ref('/')
 const sftpEntries = ref<RemoteDirEntry[]>([])
 const remoteTreeRoots = ref<RemoteTreeNode[]>([])
@@ -249,6 +86,8 @@ const remoteEditorOriginalContent = ref('')
 const remoteEditorLoading = ref(false)
 const sessionWorkspace = ref<Record<string, SessionWorkspaceState>>({})
 const remoteContextMenu = ref<{ x: number; y: number; target: RemoteContextTarget } | null>(null)
+const remoteDropActive = ref(false)
+const remoteDropCandidateCount = ref(0)
 const AUTO_RESUME_QUEUE_KEY = 'rustdock.auto-resume-queue'
 const AUTO_RETRY_TRANSFERS_KEY = 'rustdock.auto-retry-transfers'
 const DEFAULT_MAX_RETRIES_KEY = 'rustdock.default-max-retries'
@@ -263,7 +102,51 @@ const form = ref<SessionFormState>(newDraft())
 let terminal: XTermTerminal | null = null
 let fitAddon: XTermFitAddon | null = null
 let resizeHandler: (() => void) | null = null
-const dockTabs: Array<{ id: DockTab; label: string }> = [
+let remoteDropUnlisten: (() => void) | null = null
+let sftpLoadRequestToken = 0
+let remoteEditorRequestToken = 0
+let transferJobSequence = 0
+
+function bindTerminalHost(element: Element | ComponentPublicInstance | null) {
+  terminalHost.value = element instanceof HTMLElement ? element : null
+}
+
+function bindRemoteDropZone(element: Element | ComponentPublicInstance | null) {
+  remoteDropZone.value = element instanceof HTMLElement ? element : null
+}
+
+const sessionSidebarState = {
+  sessionFilter,
+  form,
+  connectSecret,
+  rememberSecret
+}
+
+const terminalCredentialState = {
+  connectSecret,
+  rememberSecret
+}
+
+const workspaceDockState = {
+  sftpPath,
+  remoteTransferPath,
+  sftpCreatePath,
+  sftpRenameTarget,
+  localTransferPath,
+  remoteEditorContent,
+  autoResumeQueue,
+  backgroundOnClose,
+  enableNotifications,
+  autoRetryTransfers,
+  autoRemoveSuccessfulJobs,
+  defaultMaxRetries,
+  retryBaseDelaySeconds,
+  retryMaxDelaySeconds,
+  transferEventQuery,
+  transferEventLevelFilter
+}
+
+const dockTabs: DockTabOption[] = [
   { id: 'browser', label: 'SSH 浏览器' },
   { id: 'editor', label: '远程编辑器' },
   { id: 'queue', label: '传输队列' },
@@ -273,6 +156,18 @@ const dockTabs: Array<{ id: DockTab; label: string }> = [
 
 const selectedSession = computed(() =>
   sessions.value.find((session) => session.id === selectedSessionId.value) ?? null
+)
+const activeWorkspaceSession = computed(() =>
+  sessions.value.find((session) => session.id === activeTerminalId.value) ?? null
+)
+const terminalContextSession = computed(() => activeWorkspaceSession.value ?? selectedSession.value)
+const workspaceMismatch = computed(
+  () =>
+    Boolean(
+      activeWorkspaceSession.value &&
+        selectedSession.value &&
+        activeWorkspaceSession.value.id !== selectedSession.value.id
+    )
 )
 
 const filteredSessions = computed(() => {
@@ -332,32 +227,107 @@ const runningTransferCount = computed(
 const failedTransferCount = computed(
   () => transferQueue.value.filter((job) => job.status === 'error').length
 )
-const selectedSessionSummary = computed(() => {
-  if (!selectedSession.value) {
-    return '先在左侧选择一个已保存会话，或先新建一个草稿。'
+const remoteContextSelectionEntries = computed(() => {
+  const target = remoteContextMenu.value?.target
+  if (!target) {
+    return []
   }
-  return `${selectedSession.value.username}@${selectedSession.value.host}:${selectedSession.value.port}`
+
+  const selectedPaths = selectedRemotePaths.value.includes(target.path)
+    ? selectedRemotePaths.value
+    : [target.path]
+  return sftpEntries.value.filter((entry) => selectedPaths.includes(entry.path))
 })
-const selectedSessionRemoteRoot = computed(
-  () => selectedSession.value?.remote_roots[0]?.trim() || '/'
+const remoteContextSelectionCount = computed(() => remoteContextSelectionEntries.value.length)
+const remoteContextSelectionFileCount = computed(() =>
+  remoteContextSelectionEntries.value.filter((entry) => !entry.is_dir).length
 )
-const selectedSessionAuthLabel = computed(() => {
-  if (!selectedSession.value) {
+const remoteContextSelectionLabel = computed(() =>
+  remoteContextSelectionCount.value > 1
+    ? `已选 ${remoteContextSelectionCount.value} 项`
+    : remoteContextSelectionEntries.value[0]?.name ?? remoteContextMenu.value?.target.name ?? '当前项'
+)
+const remoteContextSelectionMeta = computed(() => {
+  if (remoteContextSelectionCount.value > 1) {
+    const directoryCount =
+      remoteContextSelectionCount.value - remoteContextSelectionFileCount.value
+    return `${remoteContextSelectionFileCount.value} 文件 · ${directoryCount} 目录`
+  }
+  return remoteContextMenu.value?.target.path ?? ''
+})
+const remoteContextQueueDownloadLabel = computed(() =>
+  remoteContextSelectionCount.value > 1
+    ? `将 ${remoteContextSelectionCount.value} 项加入下载队列`
+    : remoteContextMenu.value?.target.isDir
+      ? '将目录加入下载队列'
+      : '加入下载队列'
+)
+const remoteContextDeleteLabel = computed(() =>
+  remoteContextSelectionCount.value > 1
+    ? `删除已选 ${remoteContextSelectionCount.value} 项`
+    : '删除'
+)
+const remoteDropSummary = computed(() =>
+  remoteDropCandidateCount.value > 0
+    ? `拖放 ${remoteDropCandidateCount.value} 项`
+    : '拖放本地文件或目录'
+)
+const remoteDropHint = computed(() => `释放以上传到 ${sftpPath.value || '/'} 并加入队列`)
+
+function sessionSummary(session: SessionProfile | null, fallback: string): string {
+  if (!session) {
+    return fallback
+  }
+
+  return `${session.username}@${session.host}:${session.port}`
+}
+
+function sessionPrimaryRemoteRoot(session: SessionProfile | null): string {
+  return session?.remote_roots[0]?.trim() || '/'
+}
+
+function sessionAuthLabel(session: SessionProfile | null): string {
+  if (!session) {
     return '未选择认证方式'
   }
-  if (selectedSession.value.auth_method === 'Password') {
+  if (session.auth_method === 'Password') {
     return '密码认证'
   }
-  if (selectedSession.value.auth_method === 'Agent') {
+  if (session.auth_method === 'Agent') {
     return 'SSH 代理'
   }
-  return `密钥 ${basename(selectedSession.value.auth_method.PrivateKey.path)}`
-})
-const selectedSessionTagSummary = computed(() => {
-  if (!selectedSession.value?.tags.length) {
+  return `密钥 ${basename(session.auth_method.PrivateKey.path)}`
+}
+
+function sessionTagSummary(session: SessionProfile | null): string {
+  if (!session?.tags.length) {
     return '无标签'
   }
-  return selectedSession.value.tags.join(' · ')
+  return session.tags.join(' · ')
+}
+
+const selectedSessionSummary = computed(() => {
+  return sessionSummary(selectedSession.value, '先在左侧选择一个已保存会话，或先新建一个草稿。')
+})
+const selectedSessionRemoteRoot = computed(() => sessionPrimaryRemoteRoot(selectedSession.value))
+const selectedSessionAuthLabel = computed(() => sessionAuthLabel(selectedSession.value))
+const activeWorkspaceSummary = computed(() =>
+  sessionSummary(activeWorkspaceSession.value, '右侧远端工作区未连接。')
+)
+const terminalContextRemoteRoot = computed(() => sessionPrimaryRemoteRoot(terminalContextSession.value))
+const terminalContextAuthLabel = computed(() => sessionAuthLabel(terminalContextSession.value))
+const terminalContextTagSummary = computed(() => sessionTagSummary(terminalContextSession.value))
+const knownHostTargetSession = computed(() => activeWorkspaceSession.value ?? selectedSession.value)
+const hasKnownHostTarget = computed(() => Boolean(knownHostTargetSession.value))
+const knownHostTargetName = computed(() => knownHostTargetSession.value?.name ?? null)
+const knownHostTargetScopeLabel = computed(() => {
+  if (activeWorkspaceSession.value) {
+    return '活动工作区'
+  }
+  if (selectedSession.value) {
+    return '左侧草稿'
+  }
+  return '未选择目标'
 })
 const remoteEditorDirty = computed(
   () => remoteEditorPath.value.length > 0 && remoteEditorContent.value !== remoteEditorOriginalContent.value
@@ -365,6 +335,7 @@ const remoteEditorDirty = computed(
 const remoteEditorTitle = computed(() =>
   remoteEditorPath.value ? basename(remoteEditorPath.value) : '未打开文件'
 )
+const terminalContextTagSummaryText = computed(() => terminalContextTagSummary.value)
 const editorConnectLabel = computed(() =>
   form.value.id || selectedSessionId.value ? '保存并连接' : '创建并连接'
 )
@@ -428,34 +399,39 @@ async function loadKnownHosts() {
 }
 
 function startNewSession() {
-  persistSessionWorkspace()
+  persistSelectedSessionSecret()
+  if (!activeTerminalId.value) {
+    persistVisibleWorkspace()
+  }
   selectedSessionId.value = null
   form.value = newDraft()
-  sftpPath.value = '/'
-  sftpEntries.value = []
-  remoteTreeRoots.value = []
-  remoteTransferPath.value = ''
-  localTransferPath.value = ''
-  selectedRemotePaths.value = []
-  sftpCreatePath.value = ''
-  sftpRenameTarget.value = ''
-  remoteEditorPath.value = ''
-  remoteEditorContent.value = ''
-  remoteEditorOriginalContent.value = ''
   connectSecret.value = ''
   rememberSecret.value = false
-  activeDockTab.value = 'browser'
-  statusLine.value = '已重置草稿。'
+  if (!activeTerminalId.value) {
+    clearVisibleWorkspace()
+  }
+  statusLine.value = activeTerminalId.value
+    ? '已打开新的会话草稿，当前远端工作区保持不变。'
+    : '已重置草稿。'
 }
 
 async function selectSession(session: SessionProfile) {
   if (selectedSessionId.value && selectedSessionId.value !== session.id) {
-    persistSessionWorkspace(selectedSessionId.value)
+    persistSelectedSessionSecret(selectedSessionId.value)
+    if (!activeTerminalId.value) {
+      persistVisibleWorkspace(selectedSessionId.value)
+    }
   }
   selectedSessionId.value = session.id
   form.value = draftFromSession(session)
-  await restoreSessionContext(session)
-  statusLine.value = `已选择 ${session.name}。`
+  if (!activeTerminalId.value || activeTerminalId.value === session.id) {
+    applyWorkspaceState(session)
+  }
+  await ensureSelectedSessionSecret(session)
+  statusLine.value =
+    activeTerminalId.value && activeTerminalId.value !== session.id
+      ? `已切换左侧草稿到 ${session.name}，右侧仍绑定到 ${activeWorkspaceSession.value?.name ?? '当前工作区'}。`
+      : `已选择 ${session.name}。`
 }
 
 async function connectSessionFromList(session: SessionProfile) {
@@ -512,6 +488,21 @@ function defaultWorkspaceState(session: SessionProfile): SessionWorkspaceState {
   }
 }
 
+function clearVisibleWorkspace() {
+  invalidateVisibleWorkspaceOperations()
+  sftpPath.value = '/'
+  sftpEntries.value = []
+  remoteTreeRoots.value = []
+  remoteTransferPath.value = ''
+  localTransferPath.value = ''
+  remoteTransferIsDir.value = false
+  selectedRemotePaths.value = []
+  sftpCreatePath.value = ''
+  sftpRenameTarget.value = ''
+  clearRemoteEditorBuffer()
+  activeDockTab.value = 'browser'
+}
+
 function getWorkspaceState(session: SessionProfile): SessionWorkspaceState {
   const existing = sessionWorkspace.value[session.id]
   if (existing) {
@@ -526,7 +517,11 @@ function getWorkspaceState(session: SessionProfile): SessionWorkspaceState {
   return created
 }
 
-function persistSessionWorkspace(sessionId = selectedSessionId.value) {
+function currentVisibleWorkspaceId(): string | null {
+  return activeTerminalId.value ?? selectedSessionId.value
+}
+
+function persistSelectedSessionSecret(sessionId = selectedSessionId.value) {
   if (!sessionId) {
     return
   }
@@ -548,6 +543,40 @@ function persistSessionWorkspace(sessionId = selectedSessionId.value) {
       connectSecret: connectSecret.value,
       rememberSecret: rememberSecret.value,
       secretHydrated,
+      sftpPath: existing?.sftpPath ?? session.remote_roots[0] ?? '/',
+      sftpEntries: cloneRemoteEntries(existing?.sftpEntries ?? []),
+      remoteTreeRoots: cloneRemoteTreeNodes(existing?.remoteTreeRoots ?? buildRemoteTreeRoots(session)),
+      remoteTransferPath: existing?.remoteTransferPath ?? '',
+      localTransferPath: existing?.localTransferPath ?? '',
+      remoteTransferIsDir: existing?.remoteTransferIsDir ?? false,
+      selectedRemotePaths: [...(existing?.selectedRemotePaths ?? [])],
+      sftpCreatePath: existing?.sftpCreatePath ?? '',
+      sftpRenameTarget: existing?.sftpRenameTarget ?? '',
+      remoteEditorPath: existing?.remoteEditorPath ?? '',
+      remoteEditorContent: existing?.remoteEditorContent ?? '',
+      remoteEditorOriginalContent: existing?.remoteEditorOriginalContent ?? '',
+      activeDockTab: existing?.activeDockTab ?? 'browser'
+    }
+  }
+}
+
+function persistVisibleWorkspace(sessionId = currentVisibleWorkspaceId()) {
+  if (!sessionId) {
+    return
+  }
+
+  const session = sessions.value.find((entry) => entry.id === sessionId)
+  if (!session) {
+    return
+  }
+  const existing = getWorkspaceState(session)
+
+  sessionWorkspace.value = {
+    ...sessionWorkspace.value,
+    [sessionId]: {
+      connectSecret: existing.connectSecret,
+      rememberSecret: existing.rememberSecret,
+      secretHydrated: existing.secretHydrated,
       sftpPath: sftpPath.value,
       sftpEntries: cloneRemoteEntries(sftpEntries.value),
       remoteTreeRoots: cloneRemoteTreeNodes(remoteTreeRoots.value),
@@ -566,6 +595,7 @@ function persistSessionWorkspace(sessionId = selectedSessionId.value) {
 }
 
 function applyWorkspaceState(session: SessionProfile) {
+  invalidateVisibleWorkspaceOperations()
   const state = getWorkspaceState(session)
   sftpPath.value = state.sftpPath
   sftpEntries.value = cloneRemoteEntries(state.sftpEntries)
@@ -579,16 +609,126 @@ function applyWorkspaceState(session: SessionProfile) {
   remoteEditorPath.value = state.remoteEditorPath
   remoteEditorContent.value = state.remoteEditorContent
   remoteEditorOriginalContent.value = state.remoteEditorOriginalContent
-  connectSecret.value = state.connectSecret
-  rememberSecret.value = state.rememberSecret
   activeDockTab.value = state.activeDockTab
 }
 
-async function ensureSessionSecret(session: SessionProfile) {
+function invalidateVisibleWorkspaceOperations() {
+  sftpLoadRequestToken += 1
+  remoteEditorRequestToken += 1
+  sftpBusy.value = false
+  remoteEditorLoading.value = false
+}
+
+function clearRemoteEditorBuffer() {
+  remoteEditorPath.value = ''
+  remoteEditorContent.value = ''
+  remoteEditorOriginalContent.value = ''
+}
+
+function matchesRemotePathTarget(targetPath: string, candidatePath: string, candidateIsDir: boolean): boolean {
+  if (targetPath === candidatePath) {
+    return true
+  }
+
+  const normalizedCandidate = candidatePath.replace(/\/$/, '')
+  return candidateIsDir && targetPath.startsWith(`${normalizedCandidate}/`)
+}
+
+function pruneDeletedRemoteState(entries: Array<{ path: string; isDir: boolean }>) {
+  const isDeletedPath = (targetPath: string) =>
+    entries.some((entry) => matchesRemotePathTarget(targetPath, entry.path, entry.isDir))
+
+  if (remoteEditorPath.value && isDeletedPath(remoteEditorPath.value)) {
+    clearRemoteEditorBuffer()
+  }
+
+  if (remoteTransferPath.value && isDeletedPath(remoteTransferPath.value)) {
+    remoteTransferPath.value = ''
+    remoteTransferIsDir.value = false
+  }
+
+  if (sftpRenameTarget.value && isDeletedPath(sftpRenameTarget.value)) {
+    sftpRenameTarget.value = ''
+  }
+
+  selectedRemotePaths.value = selectedRemotePaths.value.filter((path) => !isDeletedPath(path))
+}
+
+function isActiveWorkspaceSession(sessionId: string): boolean {
+  return activeTerminalId.value === sessionId
+}
+
+function canUpdateVisibleTerminalState(sessionId: string): boolean {
+  return !activeTerminalId.value || activeTerminalId.value === sessionId
+}
+
+function canSendTerminalCommand(sessionId: string): boolean {
+  const tab = findTerminalTab(sessionId)
+  return tab?.status === 'Connected' || tab?.status === 'Connecting'
+}
+
+function handleTerminalCommandFailure(sessionId: string, error: unknown) {
+  const message = renderError(error)
+  if (
+    message.includes('Terminal session is not connected') ||
+    message.includes('session command channel is closed')
+  ) {
+    setTerminalTabStatus(sessionId, 'Disconnected')
+    statusLine.value = '终端连接已结束，输入与窗口同步已停止。'
+    return
+  }
+
+  statusLine.value = message
+}
+
+function hasTrackedTransferJob(jobId: string): boolean {
+  return transferQueue.value.some((job) => job.id === jobId)
+}
+
+function nextTransferJobId(kind: TransferJobKind, hint = ''): string {
+  transferJobSequence += 1
+  const normalizedHint = hint
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+
+  const suffix = normalizedHint ? `-${normalizedHint}` : ''
+  return `${Date.now()}-${transferJobSequence}-${kind}${suffix}`
+}
+
+function purgeTransfersForSession(sessionId: string) {
+  const removedJobIds = new Set(
+    transferQueue.value.filter((job) => job.sessionId === sessionId).map((job) => job.id)
+  )
+
+  if (removedJobIds.size === 0) {
+    transferEvents.value = transferEvents.value.filter((event) => event.session_id !== sessionId)
+    return
+  }
+
+  transferQueue.value = transferQueue.value.filter((job) => job.sessionId !== sessionId)
+  transferEvents.value = transferEvents.value.filter(
+    (event) => event.session_id !== sessionId && !removedJobIds.has(event.job_id)
+  )
+}
+
+async function refreshActiveWorkspaceDirectory(sessionId: string, path: string): Promise<boolean> {
+  if (!isActiveWorkspaceSession(sessionId)) {
+    return false
+  }
+
+  return loadSftpDirectory(path)
+}
+
+async function ensureSelectedSessionSecret(session: SessionProfile) {
   const state = getWorkspaceState(session)
   if (state.secretHydrated) {
-    connectSecret.value = state.connectSecret
-    rememberSecret.value = state.rememberSecret
+    if (selectedSessionId.value === session.id) {
+      connectSecret.value = state.connectSecret
+      rememberSecret.value = state.rememberSecret
+    }
     return
   }
 
@@ -601,16 +741,24 @@ async function ensureSessionSecret(session: SessionProfile) {
       ...sessionWorkspace.value,
       [session.id]: state
     }
-    connectSecret.value = state.connectSecret
-    rememberSecret.value = state.rememberSecret
+    if (selectedSessionId.value === session.id) {
+      connectSecret.value = state.connectSecret
+      rememberSecret.value = state.rememberSecret
+    }
   } catch (error) {
-    statusLine.value = renderError(error)
+    if (selectedSessionId.value === session.id) {
+      statusLine.value = renderError(error)
+    }
   }
 }
 
-async function restoreSessionContext(session: SessionProfile) {
-  applyWorkspaceState(session)
-  await ensureSessionSecret(session)
+function requireActiveWorkspace(actionLabel: string): SessionProfile | null {
+  if (!activeWorkspaceSession.value) {
+    statusLine.value = `${actionLabel}前请先连接一个活动工作区。`
+    return null
+  }
+
+  return activeWorkspaceSession.value
 }
 
 function findTerminalTab(sessionId: string): TerminalTab | null {
@@ -657,8 +805,12 @@ async function activateTerminalTab(sessionId: string) {
   if (!tab) {
     return
   }
+  const previousVisibleContextId = currentVisibleWorkspaceId()
+  if (previousVisibleContextId && previousVisibleContextId !== sessionId) {
+    persistVisibleWorkspace(previousVisibleContextId)
+  }
   if (selectedSessionId.value && selectedSessionId.value !== sessionId) {
-    persistSessionWorkspace(selectedSessionId.value)
+    persistSelectedSessionSecret(selectedSessionId.value)
   }
   activeTerminalId.value = tab.sessionId
   activeTerminalName.value = tab.sessionName
@@ -668,7 +820,8 @@ async function activateTerminalTab(sessionId: string) {
   const session = sessions.value.find((entry) => entry.id === tab.sessionId)
   if (session) {
     form.value = draftFromSession(session)
-    await restoreSessionContext(session)
+    applyWorkspaceState(session)
+    await ensureSelectedSessionSecret(session)
   }
   syncTerminalViewport()
 }
@@ -694,17 +847,28 @@ function registerTerminalTab(connection: TerminalConnection): TerminalTab {
   return tab
 }
 
-function removeTerminalTab(sessionId: string) {
+async function removeTerminalTab(
+  sessionId: string,
+  options: {
+    activateFallback?: boolean
+  } = {}
+) {
+  const activateFallback = options.activateFallback ?? true
   terminalTabs.value = terminalTabs.value.filter((tab) => tab.sessionId !== sessionId)
   if (activeTerminalId.value === sessionId) {
-    const nextTab = terminalTabs.value[0] ?? null
+    const nextTab = activateFallback ? terminalTabs.value[0] ?? null : null
     if (nextTab) {
-      void activateTerminalTab(nextTab.sessionId)
+      await activateTerminalTab(nextTab.sessionId)
     } else {
       activeTerminalId.value = null
       activeTerminalName.value = ''
       terminalStatus.value = 'Disconnected'
       syncTerminalViewport()
+      if (selectedSession.value) {
+        applyWorkspaceState(selectedSession.value)
+      } else {
+        clearVisibleWorkspace()
+      }
     }
   }
 }
@@ -717,6 +881,11 @@ async function saveSession(): Promise<SessionProfile | null> {
     await loadSessions()
     selectedSessionId.value = saved.id
     form.value = draftFromSession(saved)
+    persistSelectedSessionSecret(saved.id)
+    if (!activeTerminalId.value || activeTerminalId.value === saved.id) {
+      applyWorkspaceState(saved)
+      persistVisibleWorkspace(saved.id)
+    }
     statusLine.value = `已保存 ${saved.name}。`
     return saved
   } catch (error) {
@@ -748,12 +917,24 @@ async function deleteSession() {
     await invoke('delete_session', { sessionId: deletedId })
     const { [deletedId]: _deletedWorkspace, ...remainingWorkspaces } = sessionWorkspace.value
     sessionWorkspace.value = remainingWorkspaces
-    removeTerminalTab(deletedId)
-    if (!activeTerminalId.value) {
+    purgeTransfersForSession(deletedId)
+    await removeTerminalTab(deletedId)
+    await loadSessions()
+    await updateTrayQueueStatus()
+    if (activeTerminalId.value) {
+      const activeSession = sessions.value.find((session) => session.id === activeTerminalId.value)
+      if (activeSession) {
+        selectedSessionId.value = activeSession.id
+        form.value = draftFromSession(activeSession)
+        await ensureSelectedSessionSecret(activeSession)
+      }
+    } else {
       selectedSessionId.value = null
       form.value = newDraft()
+      connectSecret.value = ''
+      rememberSecret.value = false
+      clearVisibleWorkspace()
     }
-    await loadSessions()
     statusLine.value = '会话已删除。'
   } catch (error) {
     statusLine.value = renderError(error)
@@ -783,11 +964,15 @@ async function connectTerminal() {
     return
   }
 
+  const sessionId = selectedSessionId.value
+  const fallbackSessionName = selectedSession.value?.name ?? sessionId
+  const updatesVisibleTerminal = canUpdateVisibleTerminalState(sessionId)
+
   fitAddon.fit()
   const cols = terminal.cols || 120
   const rows = terminal.rows || 32
 
-  const existingTab = findTerminalTab(selectedSessionId.value)
+  const existingTab = findTerminalTab(sessionId)
   if (existingTab && existingTab.status !== 'Disconnected' && existingTab.status !== 'Failed') {
     await activateTerminalTab(existingTab.sessionId)
     activeDockTab.value = 'browser'
@@ -799,22 +984,25 @@ async function connectTerminal() {
     return
   }
   if (existingTab) {
-    removeTerminalTab(existingTab.sessionId)
+    await removeTerminalTab(existingTab.sessionId, { activateFallback: false })
   }
 
   busy.value = true
-  terminalStatus.value = 'Connecting'
+  if (updatesVisibleTerminal) {
+    terminalStatus.value = 'Connecting'
+  }
+  statusLine.value = updatesVisibleTerminal
+    ? `正在连接 ${fallbackSessionName}...`
+    : `正在连接 ${fallbackSessionName}，当前终端保持为 ${activeTerminalName.value || '现有工作区'}。`
 
   try {
     if (rememberSecret.value && connectSecret.value.trim()) {
       await invoke('save_session_secret', {
-        sessionId: selectedSessionId.value,
+        sessionId,
         secret: connectSecret.value.trim()
       })
     }
 
-    const sessionId = selectedSessionId.value
-    const fallbackSessionName = selectedSession.value?.name ?? sessionId
     const secret = await resolveSecretForSession(sessionId)
     const channel = new Channel<TerminalStreamMessage>()
     channel.onmessage = (message) => {
@@ -849,7 +1037,9 @@ async function connectTerminal() {
     await loadKnownHosts()
     statusLine.value = sftpLoaded ? `终端已连接到 ${connection.session_name}。` : sftpStatus
   } catch (error) {
-    terminalStatus.value = 'Failed'
+    if (updatesVisibleTerminal) {
+      terminalStatus.value = 'Failed'
+    }
     statusLine.value = renderError(error)
   } finally {
     busy.value = false
@@ -862,13 +1052,19 @@ async function disconnectTerminal() {
     return
   }
 
+  const sessionId = activeTerminalId.value
   try {
-    const sessionId = activeTerminalId.value
     await invoke('disconnect_terminal', { sessionId })
-    removeTerminalTab(sessionId)
+    await removeTerminalTab(sessionId)
     statusLine.value = '终端已断开。'
   } catch (error) {
-    statusLine.value = renderError(error)
+    const message = renderError(error)
+    if (message.includes('Terminal session is not connected')) {
+      await removeTerminalTab(sessionId)
+      statusLine.value = '终端已结束，本地标签已清理。'
+      return
+    }
+    statusLine.value = message
   }
 }
 
@@ -886,34 +1082,37 @@ async function closeTerminalTab(sessionId: string) {
     }
   }
 
-  removeTerminalTab(sessionId)
+  await removeTerminalTab(sessionId)
 }
 
-function closeTerminalState() {
+async function closeTerminalState() {
   if (!activeTerminalId.value) {
     terminalStatus.value = 'Disconnected'
     return
   }
-  removeTerminalTab(activeTerminalId.value)
+  await removeTerminalTab(activeTerminalId.value)
 }
 
 async function loadSftpDirectory(path?: string): Promise<boolean> {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('加载远程目录')
+  if (!workspace) {
     return false
   }
 
+  const requestToken = ++sftpLoadRequestToken
   sftpBusy.value = true
   try {
-    const sessionId = selectedSessionId.value
-    const secret = await resolveSecretForSession(sessionId)
+    const secret = await resolveSecretForSession(workspace.id)
     const listing = await invoke<RemoteDirectoryListing>('list_sftp_dir', {
       request: {
-        session_id: sessionId,
+        session_id: workspace.id,
         path: path ?? sftpPath.value,
         secret
       }
     })
+    if (requestToken !== sftpLoadRequestToken || !isActiveWorkspaceSession(workspace.id)) {
+      return false
+    }
     sftpPath.value = listing.directory
     sftpEntries.value = listing.entries
     selectedRemotePaths.value = selectedRemotePaths.value.filter((selectedPath) =>
@@ -922,10 +1121,14 @@ async function loadSftpDirectory(path?: string): Promise<boolean> {
     statusLine.value = `已加载 ${listing.directory} 下的 ${listing.entries.length} 个条目。`
     return true
   } catch (error) {
-    statusLine.value = renderError(error)
+    if (requestToken === sftpLoadRequestToken) {
+      statusLine.value = renderError(error)
+    }
     return false
   } finally {
-    sftpBusy.value = false
+    if (requestToken === sftpLoadRequestToken) {
+      sftpBusy.value = false
+    }
   }
 }
 
@@ -970,16 +1173,17 @@ async function openRemoteTreeNode(node: RemoteTreeNode) {
 }
 
 async function loadRemoteTreeChildren(node: RemoteTreeNode) {
-  if (!selectedSessionId.value || node.loading) {
+  const workspace = requireActiveWorkspace('展开远程目录')
+  if (!workspace || node.loading) {
     return
   }
 
   node.loading = true
   try {
-    const secret = await resolveSecretForSession(selectedSessionId.value)
+    const secret = await resolveSecretForSession(workspace.id)
     const listing = await invoke<RemoteDirectoryListing>('list_sftp_dir', {
       request: {
-        session_id: selectedSessionId.value,
+        session_id: workspace.id,
         path: node.path,
         secret
       }
@@ -1000,9 +1204,7 @@ function openRemoteEntry(entry: RemoteDirEntry) {
     void loadSftpDirectory(entry.path)
     return
   }
-  remoteTransferPath.value = entry.path
-  remoteTransferIsDir.value = entry.is_dir
-  sftpRenameTarget.value = entry.path
+  setRemoteMutationTarget(entry.path, entry.is_dir)
   if (!localTransferPath.value) {
     localTransferPath.value = entry.name
   }
@@ -1010,10 +1212,14 @@ function openRemoteEntry(entry: RemoteDirEntry) {
   void openRemoteTextFile(entry.path)
 }
 
+function setRemoteMutationTarget(path: string, isDir: boolean) {
+  remoteTransferPath.value = path
+  remoteTransferIsDir.value = isDir
+  sftpRenameTarget.value = path
+}
+
 function selectRemotePathForMutation(entry: RemoteDirEntry) {
-  remoteTransferPath.value = entry.path
-  remoteTransferIsDir.value = entry.is_dir
-  sftpRenameTarget.value = entry.path
+  setRemoteMutationTarget(entry.path, entry.is_dir)
   statusLine.value = `已选择 ${entry.path}。`
 }
 
@@ -1033,6 +1239,52 @@ function clearRemoteSelection() {
   selectedRemotePaths.value = []
 }
 
+function selectAllRemoteEntries() {
+  const nextSelection = sftpEntries.value.map((entry) => entry.path)
+  selectedRemotePaths.value = nextSelection
+  if (nextSelection.length) {
+    statusLine.value = `已选中当前目录下 ${nextSelection.length} 项。`
+  }
+}
+
+function clearRemoteDropState() {
+  remoteDropActive.value = false
+  remoteDropCandidateCount.value = 0
+}
+
+function canAcceptRemoteDrop(): boolean {
+  return (
+    activeDockTab.value === 'browser' &&
+    Boolean(activeWorkspaceSession.value) &&
+    Boolean(remoteDropZone.value) &&
+    !queueRunning.value &&
+    !sftpBusy.value
+  )
+}
+
+function toCssDropPosition(position: { x: number; y: number }) {
+  const scale = window.devicePixelRatio || 1
+  return {
+    x: position.x / scale,
+    y: position.y / scale
+  }
+}
+
+function isPositionInsideRemoteDropZone(position: { x: number; y: number }): boolean {
+  if (!canAcceptRemoteDrop() || !remoteDropZone.value) {
+    return false
+  }
+
+  const rect = remoteDropZone.value.getBoundingClientRect()
+  const cssPosition = toCssDropPosition(position)
+  return (
+    cssPosition.x >= rect.left &&
+    cssPosition.x <= rect.right &&
+    cssPosition.y >= rect.top &&
+    cssPosition.y <= rect.bottom
+  )
+}
+
 function goToParentDirectory() {
   if (!sftpPath.value || sftpPath.value === '/') {
     sftpPath.value = '/'
@@ -1046,8 +1298,12 @@ function goToParentDirectory() {
 }
 
 async function downloadSelectedRemoteFile() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('下载远程文件')
+  if (!workspace) {
+    return
+  }
+  if (remoteTransferIsDir.value) {
+    statusLine.value = '目录下载请使用“加入下载队列”或“批量下载”。'
     return
   }
   if (!remoteTransferPath.value.trim() || !localTransferPath.value.trim()) {
@@ -1057,11 +1313,10 @@ async function downloadSelectedRemoteFile() {
 
   sftpBusy.value = true
   try {
-    const sessionId = selectedSessionId.value
-    const secret = await resolveSecretForSession(sessionId)
+    const secret = await resolveSecretForSession(workspace.id)
     const result = await invoke<TransferResult>('download_sftp_file', {
       request: {
-        session_id: sessionId,
+        session_id: workspace.id,
         remote_path: remoteTransferPath.value.trim(),
         local_path: localTransferPath.value.trim(),
         secret
@@ -1076,8 +1331,8 @@ async function downloadSelectedRemoteFile() {
 }
 
 async function uploadLocalFile() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('上传本地文件')
+  if (!workspace) {
     return
   }
   if (!remoteTransferPath.value.trim() || !localTransferPath.value.trim()) {
@@ -1085,20 +1340,31 @@ async function uploadLocalFile() {
     return
   }
 
+  let localInfo: LocalPathInspection
+  try {
+    localInfo = await inspectLocalPath(localTransferPath.value.trim())
+  } catch (error) {
+    statusLine.value = renderError(error)
+    return
+  }
+  if (localInfo.is_dir) {
+    statusLine.value = '目录上传请使用“加入上传队列”。'
+    return
+  }
+
   sftpBusy.value = true
   try {
-    const sessionId = selectedSessionId.value
-    const secret = await resolveSecretForSession(sessionId)
+    const secret = await resolveSecretForSession(workspace.id)
     const result = await invoke<TransferResult>('upload_sftp_file', {
       request: {
-        session_id: sessionId,
+        session_id: workspace.id,
         local_path: localTransferPath.value.trim(),
         remote_path: remoteTransferPath.value.trim(),
         secret
       }
     })
     statusLine.value = `已上传 ${result.bytes} 字节到 ${result.path}。`
-    await loadSftpDirectory(sftpPath.value)
+    await refreshActiveWorkspaceDirectory(workspace.id, sftpPath.value)
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -1117,12 +1383,42 @@ async function chooseUploadLocalFile() {
   }
 
   localTransferPath.value = selected
+  remoteTransferIsDir.value = false
   if (!remoteTransferPath.value.trim()) {
     remoteTransferPath.value = joinRemotePath(sftpPath.value, basename(selected))
   }
 }
 
+async function chooseUploadLocalDirectory() {
+  const selected = await dialogOpen({
+    multiple: false,
+    directory: true
+  })
+
+  if (!selected || Array.isArray(selected)) {
+    return
+  }
+
+  localTransferPath.value = selected
+  remoteTransferPath.value = joinRemotePath(sftpPath.value, basename(selected))
+  remoteTransferIsDir.value = true
+}
+
 async function chooseDownloadLocalPath() {
+  if (remoteTransferIsDir.value && remoteTransferPath.value.trim()) {
+    const selected = await dialogOpen({
+      multiple: false,
+      directory: true
+    })
+
+    if (!selected || Array.isArray(selected)) {
+      return
+    }
+
+    localTransferPath.value = `${selected.replace(/[\\/]$/, '')}/${basename(remoteTransferPath.value.trim())}`
+    return
+  }
+
   const selected = await dialogSave({
     defaultPath: localTransferPath.value || basename(remoteTransferPath.value) || 'download.txt'
   })
@@ -1135,8 +1431,8 @@ async function chooseDownloadLocalPath() {
 }
 
 async function queueDownloadJob() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('加入下载队列')
+  if (!workspace) {
     return
   }
   if (!remoteTransferPath.value.trim() || !localTransferPath.value.trim()) {
@@ -1144,10 +1440,11 @@ async function queueDownloadJob() {
     return
   }
 
+  const kind: TransferJobKind = remoteTransferIsDir.value ? 'download-dir' : 'download'
   const job: TransferJob = {
-    id: `${Date.now()}-download`,
-    kind: 'download',
-    sessionId: selectedSessionId.value,
+    id: nextTransferJobId(kind, basename(remoteTransferPath.value.trim())),
+    kind,
+    sessionId: workspace.id,
     remotePath: remoteTransferPath.value.trim(),
     localPath: localTransferPath.value.trim(),
     status: 'queued',
@@ -1165,8 +1462,8 @@ async function queueDownloadJob() {
 }
 
 async function queueUploadJob() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('加入上传队列')
+  if (!workspace) {
     return
   }
   if (!remoteTransferPath.value.trim() || !localTransferPath.value.trim()) {
@@ -1174,10 +1471,23 @@ async function queueUploadJob() {
     return
   }
 
+  let localInfo: LocalPathInspection
+  try {
+    localInfo = await inspectLocalPath(localTransferPath.value.trim())
+  } catch (error) {
+    statusLine.value = renderError(error)
+    return
+  }
+  if (!localInfo.is_file && !localInfo.is_dir) {
+    statusLine.value = '暂不支持该本地路径类型。'
+    return
+  }
+
+  const kind: TransferJobKind = localInfo.is_dir ? 'upload-dir' : 'upload'
   const job: TransferJob = {
-    id: `${Date.now()}-upload`,
-    kind: 'upload',
-    sessionId: selectedSessionId.value,
+    id: nextTransferJobId(kind, basename(localTransferPath.value.trim())),
+    kind,
+    sessionId: workspace.id,
     remotePath: remoteTransferPath.value.trim(),
     localPath: localTransferPath.value.trim(),
     status: 'queued',
@@ -1192,6 +1502,93 @@ async function queueUploadJob() {
   await appendTransferEvent(job, 'info', `已加入上传队列：${job.localPath}`)
   await updateTrayQueueStatus()
   statusLine.value = '已加入上传队列。'
+}
+
+async function enqueueUploadPathsToCurrentDirectory(
+  localPaths: string[],
+  sourceLabel: string
+): Promise<{ queuedCount: number; skippedCount: number }> {
+  const workspace = requireActiveWorkspace(sourceLabel)
+  if (!workspace) {
+    return { queuedCount: 0, skippedCount: 0 }
+  }
+  if (queueRunning.value) {
+    statusLine.value = `传输队列正在运行，当前不接受新的${sourceLabel}任务。`
+    return { queuedCount: 0, skippedCount: 0 }
+  }
+  if (sftpBusy.value) {
+    statusLine.value = '当前远端工作区正忙，稍后再试。'
+    return { queuedCount: 0, skippedCount: 0 }
+  }
+
+  const normalizedPaths = [...new Set(localPaths.map((path) => path.trim()).filter(Boolean))]
+  const targetDirectory = sftpPath.value || '/'
+  let queuedCount = 0
+  let skippedCount = 0
+  let firstJob: TransferJob | null = null
+
+  for (const localPath of normalizedPaths) {
+    let localInfo: LocalPathInspection
+    try {
+      localInfo = await inspectLocalPath(localPath)
+    } catch {
+      skippedCount += 1
+      continue
+    }
+
+    if (!localInfo.is_file && !localInfo.is_dir) {
+      skippedCount += 1
+      continue
+    }
+
+    const kind: TransferJobKind = localInfo.is_dir ? 'upload-dir' : 'upload'
+    const job: TransferJob = {
+      id: nextTransferJobId(kind, basename(localPath)),
+      kind,
+      sessionId: workspace.id,
+      remotePath: joinRemotePath(targetDirectory, basename(localPath)),
+      localPath,
+      status: 'queued',
+      message: '等待中',
+      attemptCount: 0,
+      maxRetries: defaultMaxRetries.value,
+      createdAt: nowEpoch(),
+      updatedAt: nowEpoch()
+    }
+
+    if (!firstJob) {
+      firstJob = job
+    }
+    transferQueue.value.push(job)
+    await persistTransferJob(job)
+    await appendTransferEvent(job, 'info', `${sourceLabel}：已加入上传队列：${job.localPath}`)
+    queuedCount += 1
+  }
+
+  if (firstJob) {
+    localTransferPath.value = firstJob.localPath
+    remoteTransferPath.value = firstJob.remotePath
+    remoteTransferIsDir.value = firstJob.kind === 'upload-dir'
+  }
+
+  await updateTrayQueueStatus()
+  return { queuedCount, skippedCount }
+}
+
+async function queueDraggedUploads(paths: string[]) {
+  const { queuedCount, skippedCount } = await enqueueUploadPathsToCurrentDirectory(paths, '拖拽上传')
+  if (queuedCount === 0) {
+    if (skippedCount > 0) {
+      statusLine.value = '拖拽的本地路径不可用，未加入上传队列。'
+    }
+    return
+  }
+
+  activeDockTab.value = 'queue'
+  statusLine.value =
+    skippedCount > 0
+      ? `已将 ${queuedCount} 项拖放到 ${sftpPath.value || '/'}，加入上传队列，另有 ${skippedCount} 项已跳过。`
+      : `已将 ${queuedCount} 项拖放到 ${sftpPath.value || '/'}，加入上传队列。`
 }
 
 async function runTransferQueue() {
@@ -1214,7 +1611,7 @@ async function runTransferQueue() {
     if (!queueStopRequested.value) {
       await notifyUser('传输队列完成', '所有排队任务都已处理完成。')
     }
-    if (selectedSessionId.value) {
+    if (activeWorkspaceSession.value) {
       await loadSftpDirectory(sftpPath.value)
     }
   } finally {
@@ -1258,6 +1655,7 @@ async function retryTransferJob(jobId: string) {
   job.updatedAt = nowEpoch()
   await persistTransferJob(job)
   await appendTransferEvent(job, 'info', `已加入重试队列：${job.remotePath}`)
+  await updateTrayQueueStatus()
 }
 
 async function removeTransferJob(jobId: string) {
@@ -1292,11 +1690,21 @@ async function runQueuedTransfer(job: TransferJob) {
     'info',
     `${transferKindLabel(job.kind)}任务开始执行，第 ${job.attemptCount}/${job.maxRetries + 1} 次尝试`
   )
-  const secret = await resolveSecretForSession(job.sessionId)
+  let secret: string | null
+  try {
+    secret = await resolveSecretForSession(job.sessionId)
+  } catch (error) {
+    await finalizeTransferFailure(job, renderError(error))
+    return
+  }
 
   await new Promise<void>((resolve) => {
     const channel = new Channel<TransferChannelMessage>()
     channel.onmessage = (message) => {
+      if (!hasTrackedTransferJob(job.id)) {
+        resolve()
+        return
+      }
       if (message.job_id !== job.id) {
         return
       }
@@ -1306,17 +1714,20 @@ async function runQueuedTransfer(job: TransferJob) {
       } else if (message.kind === 'progress') {
         job.transferred = message.transferred
         job.total = message.total
-        job.message = renderTransferProgress(message.transferred, message.total)
+        job.message = renderTransferProgress(
+          message.transferred,
+          message.total,
+          message.current_path,
+          message.completed_files,
+          message.total_files
+        )
       } else if (message.kind === 'completed') {
         job.status = 'success'
         job.bytes = message.bytes
         job.transferred = message.bytes
         job.total = message.bytes
         job.updatedAt = nowEpoch()
-        job.message =
-          job.kind === 'upload'
-            ? `已上传 ${message.bytes} 字节`
-            : `已下载 ${message.bytes} 字节`
+        job.message = transferSuccessMessage(job.kind, message.bytes)
         void persistTransferJob(job)
         void appendTransferEvent(job, 'info', job.message)
         void notifyUser('传输完成', job.message)
@@ -1351,6 +1762,10 @@ async function runQueuedTransfer(job: TransferJob) {
       },
       channel
     }).catch((error) => {
+      if (!hasTrackedTransferJob(job.id)) {
+        resolve()
+        return
+      }
       void finalizeTransferFailure(job, renderError(error))
       resolve()
     })
@@ -1376,8 +1791,8 @@ async function cancelRunningTransfer(jobId: string) {
 }
 
 async function createRemoteDirectory() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('创建远程目录')
+  if (!workspace) {
     return
   }
   if (!sftpCreatePath.value.trim()) {
@@ -1387,18 +1802,17 @@ async function createRemoteDirectory() {
 
   sftpBusy.value = true
   try {
-    const sessionId = selectedSessionId.value
-    const secret = await resolveSecretForSession(sessionId)
+    const secret = await resolveSecretForSession(workspace.id)
     const result = await invoke<MutationResult>('create_sftp_dir', {
       request: {
-        session_id: sessionId,
+        session_id: workspace.id,
         remote_path: sftpCreatePath.value.trim(),
         secret
       }
     })
     statusLine.value = `已创建目录 ${result.path}。`
     sftpCreatePath.value = ''
-    await loadSftpDirectory(sftpPath.value)
+    await refreshActiveWorkspaceDirectory(workspace.id, sftpPath.value)
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -1407,8 +1821,8 @@ async function createRemoteDirectory() {
 }
 
 async function renameRemotePath() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('重命名远程路径')
+  if (!workspace) {
     return
   }
   if (!remoteTransferPath.value.trim() || !sftpRenameTarget.value.trim()) {
@@ -1418,11 +1832,10 @@ async function renameRemotePath() {
 
   sftpBusy.value = true
   try {
-    const sessionId = selectedSessionId.value
-    const secret = await resolveSecretForSession(sessionId)
+    const secret = await resolveSecretForSession(workspace.id)
     const result = await invoke<MutationResult>('rename_sftp_path', {
       request: {
-        session_id: sessionId,
+        session_id: workspace.id,
         source_path: remoteTransferPath.value.trim(),
         target_path: sftpRenameTarget.value.trim(),
         secret
@@ -1431,7 +1844,7 @@ async function renameRemotePath() {
     remoteTransferPath.value = result.path
     sftpRenameTarget.value = result.path
     statusLine.value = `已将远程路径重命名为 ${result.path}。`
-    await loadSftpDirectory(sftpPath.value)
+    await refreshActiveWorkspaceDirectory(workspace.id, sftpPath.value)
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -1440,8 +1853,8 @@ async function renameRemotePath() {
 }
 
 async function deleteRemotePath() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('删除远程路径')
+  if (!workspace) {
     return
   }
   if (!remoteTransferPath.value.trim()) {
@@ -1450,7 +1863,9 @@ async function deleteRemotePath() {
   }
 
   const accepted = await dialogConfirm(
-    `确认删除${remoteTransferIsDir.value ? '目录' : '文件'}“${remoteTransferPath.value.trim()}”吗？`,
+    remoteTransferIsDir.value
+      ? `确认递归删除目录“${remoteTransferPath.value.trim()}”吗？`
+      : `确认删除文件“${remoteTransferPath.value.trim()}”吗？`,
     { title: '删除远程路径', kind: 'warning' }
   )
   if (!accepted) {
@@ -1460,26 +1875,21 @@ async function deleteRemotePath() {
 
   sftpBusy.value = true
   try {
-    const sessionId = selectedSessionId.value
-    const secret = await resolveSecretForSession(sessionId)
+    const isDirectory = remoteTransferIsDir.value
+    const secret = await resolveSecretForSession(workspace.id)
     const result = await invoke<MutationResult>('delete_sftp_path', {
       request: {
-        session_id: sessionId,
+        session_id: workspace.id,
         remote_path: remoteTransferPath.value.trim(),
-        is_dir: remoteTransferIsDir.value,
+        is_dir: isDirectory,
         secret
       }
     })
-    statusLine.value = `已删除 ${result.path}。`
-    if (remoteEditorPath.value === result.path) {
-      remoteEditorPath.value = ''
-      remoteEditorContent.value = ''
-      remoteEditorOriginalContent.value = ''
-    }
-    remoteTransferPath.value = ''
-    remoteTransferIsDir.value = false
-    sftpRenameTarget.value = ''
-    await loadSftpDirectory(sftpPath.value)
+    statusLine.value = remoteTransferIsDir.value
+      ? `已递归删除目录 ${result.path}。`
+      : `已删除文件 ${result.path}。`
+    pruneDeletedRemoteState([{ path: result.path, isDir: isDirectory }])
+    await refreshActiveWorkspaceDirectory(workspace.id, sftpPath.value)
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -1488,16 +1898,14 @@ async function deleteRemotePath() {
 }
 
 async function batchQueueDownloads() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('批量加入下载队列')
+  if (!workspace) {
     return
   }
 
-  const selectedEntries = sftpEntries.value.filter(
-    (entry) => selectedRemotePaths.value.includes(entry.path) && !entry.is_dir
-  )
+  const selectedEntries = sftpEntries.value.filter((entry) => selectedRemotePaths.value.includes(entry.path))
   if (!selectedEntries.length) {
-    statusLine.value = '请至少选择一个文件加入下载队列。'
+    statusLine.value = '请至少选择一个远程路径加入下载队列。'
     return
   }
 
@@ -1510,10 +1918,11 @@ async function batchQueueDownloads() {
   }
 
   for (const entry of selectedEntries) {
+    const kind: TransferJobKind = entry.is_dir ? 'download-dir' : 'download'
     const job: TransferJob = {
-      id: `${Date.now()}-${entry.name}-download`,
-      kind: 'download',
-      sessionId: selectedSessionId.value,
+      id: nextTransferJobId(kind, entry.name),
+      kind,
+      sessionId: workspace.id,
       remotePath: entry.path,
       localPath: `${selected.replace(/[\\/]$/, '')}/${entry.name}`,
       status: 'queued',
@@ -1529,14 +1938,10 @@ async function batchQueueDownloads() {
   }
 
   statusLine.value = `已加入 ${selectedEntries.length} 个下载任务。`
+  await updateTrayQueueStatus()
 }
 
 async function batchQueueUploads() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
-    return
-  }
-
   const selected = await dialogOpen({
     multiple: true,
     directory: false
@@ -1546,33 +1951,23 @@ async function batchQueueUploads() {
   }
 
   const files = Array.isArray(selected) ? selected : [selected]
-  const targetDirectory = sftpPath.value || '/'
-
-  for (const localPath of files) {
-    const job: TransferJob = {
-      id: `${Date.now()}-${basename(localPath)}-upload`,
-      kind: 'upload',
-      sessionId: selectedSessionId.value,
-      remotePath: joinRemotePath(targetDirectory, basename(localPath)),
-      localPath,
-      status: 'queued',
-      message: '等待中',
-      attemptCount: 0,
-      maxRetries: defaultMaxRetries.value,
-      createdAt: nowEpoch(),
-      updatedAt: nowEpoch()
+  const { queuedCount, skippedCount } = await enqueueUploadPathsToCurrentDirectory(files, '批量上传')
+  if (queuedCount === 0) {
+    if (skippedCount > 0) {
+      statusLine.value = '没有可加入批量上传队列的本地文件。'
     }
-    transferQueue.value.push(job)
-    await persistTransferJob(job)
-    await appendTransferEvent(job, 'info', `已加入批量上传队列：${job.localPath}`)
+    return
   }
 
-  statusLine.value = `已加入 ${files.length} 个上传任务到 ${targetDirectory}。`
+  statusLine.value =
+    skippedCount > 0
+      ? `已加入 ${queuedCount} 个上传任务到 ${sftpPath.value || '/'}，另有 ${skippedCount} 项已跳过。`
+      : `已加入 ${queuedCount} 个上传任务到 ${sftpPath.value || '/'}。`
 }
 
 async function batchDeleteSelectedRemote() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('批量删除远程路径')
+  if (!workspace) {
     return
   }
 
@@ -1581,9 +1976,12 @@ async function batchDeleteSelectedRemote() {
     statusLine.value = '请至少选择一个远程路径再删除。'
     return
   }
+  const includesDirectory = selectedEntries.some((entry) => entry.is_dir)
 
   const accepted = await dialogConfirm(
-    `确认删除 ${sftpPath.value} 下选中的 ${selectedEntries.length} 个远程路径吗？`,
+    includesDirectory
+      ? `确认删除 ${sftpPath.value} 下选中的 ${selectedEntries.length} 个远程路径吗？其中目录会递归删除。`
+      : `确认删除 ${sftpPath.value} 下选中的 ${selectedEntries.length} 个远程路径吗？`,
     { title: '批量删除远程路径', kind: 'warning' }
   )
   if (!accepted) {
@@ -1593,21 +1991,22 @@ async function batchDeleteSelectedRemote() {
 
   sftpBusy.value = true
   try {
-    const sessionId = selectedSessionId.value
-    const secret = await resolveSecretForSession(sessionId)
+    const secret = await resolveSecretForSession(workspace.id)
     for (const entry of selectedEntries) {
       await invoke('delete_sftp_path', {
         request: {
-          session_id: sessionId,
+          session_id: workspace.id,
           remote_path: entry.path,
           is_dir: entry.is_dir,
           secret
         }
       })
     }
-    selectedRemotePaths.value = []
-    statusLine.value = `已删除 ${selectedEntries.length} 个远程路径。`
-    await loadSftpDirectory(sftpPath.value)
+    pruneDeletedRemoteState(selectedEntries.map((entry) => ({ path: entry.path, isDir: entry.is_dir })))
+    statusLine.value = includesDirectory
+      ? `已删除 ${selectedEntries.length} 个远程路径，其中目录已递归清理。`
+      : `已删除 ${selectedEntries.length} 个远程路径。`
+    await refreshActiveWorkspaceDirectory(workspace.id, sftpPath.value)
   } catch (error) {
     statusLine.value = renderError(error)
   } finally {
@@ -1744,7 +2143,29 @@ function transferStatusLabel(value: TransferJobStatus): string {
 }
 
 function transferKindLabel(value: TransferJobKind): string {
-  return value === 'upload' ? '上传' : '下载'
+  switch (value) {
+    case 'upload-dir':
+      return '上传目录'
+    case 'download-dir':
+      return '下载目录'
+    case 'upload':
+      return '上传'
+    default:
+      return '下载'
+  }
+}
+
+function transferSuccessMessage(kind: TransferJobKind, bytes: number): string {
+  switch (kind) {
+    case 'upload-dir':
+      return `目录上传完成，共 ${bytes} 字节`
+    case 'download-dir':
+      return `目录下载完成，共 ${bytes} 字节`
+    case 'upload':
+      return `已上传 ${bytes} 字节`
+    default:
+      return `已下载 ${bytes} 字节`
+  }
 }
 
 function transferLevelLabel(value: TransferEventLevel): string {
@@ -1758,12 +2179,32 @@ function transferLevelLabel(value: TransferEventLevel): string {
   }
 }
 
-function renderTransferProgress(transferred: number, total: number | null): string {
-  if (!total || total <= 0) {
-    return `${transferred} 字节`
+function renderTransferProgress(
+  transferred: number,
+  total: number | null,
+  currentPath: string | null,
+  completedFiles: number | null,
+  totalFiles: number | null
+): string {
+  const segments: string[] = []
+
+  if (typeof totalFiles === 'number' && totalFiles > 0) {
+    const completed = typeof completedFiles === 'number' ? completedFiles : 0
+    segments.push(`${completed}/${totalFiles} 已完成`)
   }
+
+  if (currentPath) {
+    segments.push(basename(currentPath))
+  }
+
+  if (!total || total <= 0) {
+    segments.push(`${transferred} 字节`)
+    return segments.join(' · ')
+  }
+
   const percent = Math.min(100, Math.round((transferred / total) * 100))
-  return `${percent}% · ${transferred}/${total} 字节`
+  segments.push(`${percent}% · ${transferred}/${total} 字节`)
+  return segments.join(' · ')
 }
 
 function computeRetryDelaySeconds(attemptCount: number): number {
@@ -1776,6 +2217,10 @@ async function delay(ms: number) {
 }
 
 async function finalizeTransferFailure(job: TransferJob, errorMessage: string) {
+  if (!hasTrackedTransferJob(job.id)) {
+    return
+  }
+
   const retryable = isRetryableTransferError(errorMessage)
   if (retryable && autoRetryTransfers.value && job.attemptCount <= job.maxRetries) {
     const delaySeconds = computeRetryDelaySeconds(job.attemptCount)
@@ -1807,12 +2252,18 @@ async function saveCurrentSecret() {
     statusLine.value = '凭据不能为空。'
     return
   }
-  await invoke('save_session_secret', {
-    sessionId: selectedSessionId.value,
-    secret: connectSecret.value.trim()
-  })
-  rememberSecret.value = true
-  statusLine.value = '凭据已保存到系统钥匙串。'
+  try {
+    await invoke('save_session_secret', {
+      sessionId: selectedSessionId.value,
+      secret: connectSecret.value.trim()
+    })
+    rememberSecret.value = true
+    statusLine.value = selectedSession.value
+      ? `已为 ${selectedSession.value.name} 保存凭据到系统钥匙串。`
+      : '凭据已保存到系统钥匙串。'
+  } catch (error) {
+    statusLine.value = renderError(error)
+  }
 }
 
 async function forgetSavedSecret() {
@@ -1820,20 +2271,28 @@ async function forgetSavedSecret() {
     statusLine.value = '请先选择一个已保存的会话。'
     return
   }
-  await invoke('delete_session_secret', { sessionId: selectedSessionId.value })
-  connectSecret.value = ''
-  rememberSecret.value = false
-  statusLine.value = '已从系统钥匙串移除保存的凭据。'
+  try {
+    await invoke('delete_session_secret', { sessionId: selectedSessionId.value })
+    connectSecret.value = ''
+    rememberSecret.value = false
+    statusLine.value = selectedSession.value
+      ? `已移除 ${selectedSession.value.name} 的已保存凭据。`
+      : '已从系统钥匙串移除保存的凭据。'
+  } catch (error) {
+    statusLine.value = renderError(error)
+  }
 }
 
-async function forgetSelectedSessionKnownHost() {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+async function forgetKnownHostTarget() {
+  const target = knownHostTargetSession.value
+  if (!target) {
+    statusLine.value = '请先选择一个会话，或连接一个活动工作区。'
     return
   }
+  const scopeLabel = activeWorkspaceSession.value ? '活动工作区' : '左侧草稿'
 
   const accepted = await dialogConfirm(
-    `确认忘记 “${selectedSession.value?.host ?? selectedSessionId.value}” 的 known_hosts 记录吗？`,
+    `确认忘记${scopeLabel} “${target.host}” 的 known_hosts 记录吗？`,
     { title: '忘记已知主机', kind: 'warning' }
   )
   if (!accepted) {
@@ -1843,10 +2302,13 @@ async function forgetSelectedSessionKnownHost() {
 
   try {
     const removed = await invoke<number>('forget_session_known_host', {
-      sessionId: selectedSessionId.value
+      sessionId: target.id
     })
     await loadKnownHosts()
-    statusLine.value = removed > 0 ? `已移除 ${removed} 条 known_hosts 记录。` : '当前会话没有匹配的 known_hosts 记录。'
+    statusLine.value =
+      removed > 0
+        ? `已为${scopeLabel} ${target.name} 移除 ${removed} 条 known_hosts 记录。`
+        : `${scopeLabel} ${target.name} 没有匹配的 known_hosts 记录。`
   } catch (error) {
     statusLine.value = renderError(error)
   }
@@ -1875,7 +2337,25 @@ async function resolveSecretForSession(sessionId: string): Promise<string | null
     return connectSecret.value.trim()
   }
 
+  const cached = sessionWorkspace.value[sessionId]?.connectSecret.trim()
+  if (cached) {
+    return cached
+  }
+
   const secret = await invoke<string | null>('load_session_secret', { sessionId })
+  const session = sessions.value.find((entry) => entry.id === sessionId)
+  if (session) {
+    const existing = getWorkspaceState(session)
+    sessionWorkspace.value = {
+      ...sessionWorkspace.value,
+      [sessionId]: {
+        ...existing,
+        connectSecret: secret || existing.connectSecret,
+        rememberSecret: Boolean(secret),
+        secretHydrated: true
+      }
+    }
+  }
   if (selectedSessionId.value === sessionId) {
     connectSecret.value = secret || ''
     rememberSecret.value = Boolean(secret)
@@ -1884,8 +2364,8 @@ async function resolveSecretForSession(sessionId: string): Promise<string | null
 }
 
 async function openRemoteTextFile(path = remoteTransferPath.value.trim()) {
-  if (!selectedSessionId.value) {
-    statusLine.value = '请先选择一个已保存的会话。'
+  const workspace = requireActiveWorkspace('打开远程文件')
+  if (!workspace) {
     return
   }
   if (!path) {
@@ -1893,17 +2373,20 @@ async function openRemoteTextFile(path = remoteTransferPath.value.trim()) {
     return
   }
 
+  const requestToken = ++remoteEditorRequestToken
   remoteEditorLoading.value = true
   try {
-    const sessionId = selectedSessionId.value
-    const secret = await resolveSecretForSession(sessionId)
+    const secret = await resolveSecretForSession(workspace.id)
     const file = await invoke<RemoteTextFilePayload>('read_remote_text', {
       request: {
-        session_id: sessionId,
+        session_id: workspace.id,
         remote_path: path,
         secret
       }
     })
+    if (requestToken !== remoteEditorRequestToken || !isActiveWorkspaceSession(workspace.id)) {
+      return
+    }
     remoteEditorPath.value = file.path
     remoteEditorContent.value = file.content
     remoteEditorOriginalContent.value = file.content
@@ -1911,37 +2394,51 @@ async function openRemoteTextFile(path = remoteTransferPath.value.trim()) {
     activeDockTab.value = 'editor'
     statusLine.value = `已从 ${file.path} 读取 ${file.bytes} 字节。`
   } catch (error) {
-    statusLine.value = renderError(error)
+    if (requestToken === remoteEditorRequestToken) {
+      statusLine.value = renderError(error)
+    }
   } finally {
-    remoteEditorLoading.value = false
+    if (requestToken === remoteEditorRequestToken) {
+      remoteEditorLoading.value = false
+    }
   }
 }
 
 async function saveRemoteTextFile() {
-  if (!selectedSessionId.value || !remoteEditorPath.value) {
+  const workspace = requireActiveWorkspace('保存远程文件')
+  if (!workspace || !remoteEditorPath.value) {
     statusLine.value = '请先打开一个远程文本文件。'
     return
   }
 
+  const requestToken = ++remoteEditorRequestToken
+  const editorPath = remoteEditorPath.value
+  const editorContent = remoteEditorContent.value
   remoteEditorLoading.value = true
   try {
-    const sessionId = selectedSessionId.value
-    const secret = await resolveSecretForSession(sessionId)
+    const secret = await resolveSecretForSession(workspace.id)
     await invoke('write_remote_text', {
       request: {
-        session_id: sessionId,
-        remote_path: remoteEditorPath.value,
-        content: remoteEditorContent.value,
+        session_id: workspace.id,
+        remote_path: editorPath,
+        content: editorContent,
         secret
       }
     })
-    remoteEditorOriginalContent.value = remoteEditorContent.value
-    statusLine.value = `已保存 ${remoteEditorPath.value}。`
-    await loadSftpDirectory(sftpPath.value)
+    if (requestToken !== remoteEditorRequestToken || !isActiveWorkspaceSession(workspace.id)) {
+      return
+    }
+    remoteEditorOriginalContent.value = editorContent
+    statusLine.value = `已保存 ${editorPath}。`
+    await refreshActiveWorkspaceDirectory(workspace.id, sftpPath.value)
   } catch (error) {
-    statusLine.value = renderError(error)
+    if (requestToken === remoteEditorRequestToken) {
+      statusLine.value = renderError(error)
+    }
   } finally {
-    remoteEditorLoading.value = false
+    if (requestToken === remoteEditorRequestToken) {
+      remoteEditorLoading.value = false
+    }
   }
 }
 
@@ -1982,7 +2479,12 @@ function fromTransferRecord(record: TransferJobRecordPayload): TransferJob {
     localPath: record.local_path,
     remotePath: record.remote_path,
     status: record.status,
-    message: record.message,
+    message:
+      record.status === 'queued' &&
+      record.message === 'Recovered after restart' &&
+      record.attempt_count > 0
+        ? '上次运行中断，已恢复到队列'
+        : record.message,
     bytes: record.bytes,
     transferred: record.transferred,
     total: record.total,
@@ -2095,16 +2597,24 @@ async function persistBackgroundOnCloseSetting() {
 }
 
 function openDockTab(tab: DockTab) {
+  if ((tab === 'browser' || tab === 'editor') && !activeWorkspaceSession.value) {
+    statusLine.value = '右侧远端工作区未连接，先建立一个活动终端会话。'
+  }
   activeDockTab.value = tab
-  if (tab === 'editor' && !remoteEditorPath.value && remoteTransferPath.value.trim()) {
+  if (tab === 'editor' && activeWorkspaceSession.value && !remoteEditorPath.value && remoteTransferPath.value.trim()) {
     void openRemoteTextFile()
   }
 }
 
 watch(
+  [connectSecret, rememberSecret],
+  () => {
+    persistSelectedSessionSecret()
+  }
+)
+
+watch(
   [
-    connectSecret,
-    rememberSecret,
     sftpPath,
     sftpEntries,
     remoteTreeRoots,
@@ -2120,10 +2630,16 @@ watch(
     activeDockTab
   ],
   () => {
-    persistSessionWorkspace()
+    persistVisibleWorkspace()
   },
   { deep: true }
 )
+
+watch([activeDockTab, activeTerminalId, queueRunning, sftpBusy], () => {
+  if (!canAcceptRemoteDrop()) {
+    clearRemoteDropState()
+  }
+})
 
 function loadAutoRetrySettings() {
   autoRetryTransfers.value = window.localStorage.getItem(AUTO_RETRY_TRANSFERS_KEY) !== 'false'
@@ -2159,13 +2675,111 @@ function closeRemoteContextMenu() {
   remoteContextMenu.value = null
 }
 
+function primeRemoteContextTarget(target: RemoteContextTarget) {
+  setRemoteMutationTarget(target.path, target.isDir)
+  if (!selectedRemotePaths.value.includes(target.path)) {
+    selectedRemotePaths.value = [target.path]
+  }
+}
+
 function openRemoteContextMenu(event: MouseEvent, target: RemoteContextTarget) {
   event.preventDefault()
+  primeRemoteContextTarget(target)
   remoteContextMenu.value = {
     x: event.clientX,
     y: event.clientY,
     target
   }
+}
+
+function openContextMenuDirectory() {
+  const target = remoteContextMenu.value?.target
+  if (!target) {
+    return
+  }
+  closeRemoteContextMenu()
+  void loadSftpDirectory(target.path)
+}
+
+function openContextMenuEditor() {
+  const target = remoteContextMenu.value?.target
+  if (!target) {
+    return
+  }
+  closeRemoteContextMenu()
+  void openRemoteTextFile(target.path)
+}
+
+function prepareContextMenuDownloadSource() {
+  const target = remoteContextMenu.value?.target
+  if (!target) {
+    return
+  }
+  setRemoteMutationTarget(target.path, target.isDir)
+  localTransferPath.value = target.name
+  activeDockTab.value = 'browser'
+  closeRemoteContextMenu()
+}
+
+function prepareContextMenuRename() {
+  const target = remoteContextMenu.value?.target
+  if (!target) {
+    return
+  }
+  setRemoteMutationTarget(target.path, target.isDir)
+  activeDockTab.value = 'browser'
+  closeRemoteContextMenu()
+}
+
+async function queueContextMenuDownloads() {
+  closeRemoteContextMenu()
+  await batchQueueDownloads()
+}
+
+async function deleteContextMenuSelection() {
+  const selectionCount = remoteContextSelectionCount.value
+  closeRemoteContextMenu()
+  if (selectionCount > 1) {
+    await batchDeleteSelectedRemote()
+    return
+  }
+  await deleteRemotePath()
+}
+
+function clearRemoteSelectionFromContextMenu() {
+  clearRemoteSelection()
+  closeRemoteContextMenu()
+}
+
+async function installRemoteDropListener() {
+  remoteDropUnlisten = await getCurrentWebview().onDragDropEvent(async (event) => {
+    const payload = event.payload
+
+    if (payload.type === 'leave') {
+      clearRemoteDropState()
+      return
+    }
+
+    if (payload.type === 'enter') {
+      remoteDropCandidateCount.value = payload.paths.length
+      remoteDropActive.value = isPositionInsideRemoteDropZone(payload.position)
+      return
+    }
+
+    if (payload.type === 'over') {
+      remoteDropActive.value = isPositionInsideRemoteDropZone(payload.position)
+      return
+    }
+
+    const droppedPaths = payload.paths
+    const droppedInsideRemoteZone = isPositionInsideRemoteDropZone(payload.position)
+    clearRemoteDropState()
+    if (!droppedInsideRemoteZone || droppedPaths.length === 0) {
+      return
+    }
+
+    await queueDraggedUploads(droppedPaths)
+  })
 }
 
 async function updateTrayQueueStatus() {
@@ -2206,6 +2820,10 @@ function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path
 }
 
+function sessionNameForId(sessionId: string): string {
+  return sessions.value.find((session) => session.id === sessionId)?.name ?? sessionId
+}
+
 function joinRemotePath(directory: string, name: string): string {
   if (!directory || directory === '/') {
     return `/${name}`
@@ -2228,6 +2846,10 @@ async function dialogOpen(options: Parameters<typeof import('@tauri-apps/plugin-
 async function dialogSave(options: Parameters<typeof import('@tauri-apps/plugin-dialog')['save']>[0]) {
   const { save } = await import('@tauri-apps/plugin-dialog')
   return save(options)
+}
+
+async function inspectLocalPath(path: string) {
+  return invoke<LocalPathInspection>('inspect_local_path', { path })
 }
 
 async function dialogConfirm(message: string, options?: Parameters<typeof import('@tauri-apps/plugin-dialog')['confirm']>[1]) {
@@ -2292,27 +2914,29 @@ async function ensureTerminalRuntime() {
   syncTerminalViewport()
 
   terminal.onData((data) => {
-    if (!activeTerminalId.value) {
+    if (!activeTerminalId.value || !canSendTerminalCommand(activeTerminalId.value)) {
       return
     }
+    const sessionId = activeTerminalId.value
     invoke('send_terminal_input', {
-      sessionId: activeTerminalId.value,
+      sessionId,
       input: data
     }).catch((error) => {
-      statusLine.value = renderError(error)
+      handleTerminalCommandFailure(sessionId, error)
     })
   })
 
   terminal.onResize(({ cols, rows }) => {
-    if (!activeTerminalId.value) {
+    if (!activeTerminalId.value || !canSendTerminalCommand(activeTerminalId.value)) {
       return
     }
+    const sessionId = activeTerminalId.value
     invoke('resize_terminal', {
-      sessionId: activeTerminalId.value,
+      sessionId,
       cols,
       rows
     }).catch((error) => {
-      statusLine.value = renderError(error)
+      handleTerminalCommandFailure(sessionId, error)
     })
   })
 }
@@ -2332,6 +2956,7 @@ onMounted(async () => {
   loadTransferBehaviorSettings()
   await invoke('set_background_on_close', { enabled: backgroundOnClose.value })
   await installTerminal()
+  await installRemoteDropListener()
   await nextTick()
   await loadSessions()
   await loadTransferQueue()
@@ -2345,6 +2970,8 @@ onBeforeUnmount(() => {
   if (resizeHandler) {
     window.removeEventListener('resize', resizeHandler)
   }
+  remoteDropUnlisten?.()
+  clearRemoteDropState()
   for (const tab of terminalTabs.value) {
     invoke('disconnect_terminal', { sessionId: tab.sessionId }).catch(() => undefined)
   }
@@ -2354,158 +2981,24 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app-shell">
-    <aside class="left-rail">
-      <div class="brand-block">
-        <p class="eyebrow">中文工作台</p>
-        <h1>RustDock</h1>
-        <p class="subcopy">
-          左侧管理会话书签，中间是终端主工作区，右侧是可停靠的 SSH 文件浏览与编辑面板。
-        </p>
-      </div>
-
-      <div class="rail-actions">
-        <button class="primary" @click="startNewSession">新建会话</button>
-        <button class="ghost" :disabled="loading" @click="loadSessions">刷新列表</button>
-      </div>
-
-      <label class="search-card">
-        <span>会话搜索</span>
-        <input v-model="sessionFilter" placeholder="主机、标签、用户名" />
-      </label>
-
-      <div class="session-directory">
-        <div class="section-title">
-          <span>已保存会话</span>
-          <span>{{ filteredSessions.length }}</span>
-        </div>
-
-        <button
-          v-for="session in filteredSessions"
-          :key="session.id"
-          class="session-card"
-          :class="{
-            selected: session.id === selectedSessionId,
-            live: session.id === activeTerminalId
-          }"
-          @click="selectSession(session)"
-          @dblclick="connectSessionFromList(session)"
-        >
-          <div class="session-card-head">
-            <strong>{{ session.name }}</strong>
-            <span class="badge">{{ session.id === activeTerminalId ? '在线' : syncLabel(session.sync_state) }}</span>
-          </div>
-          <span>{{ session.username }}@{{ session.host }}:{{ session.port }}</span>
-          <small>
-            {{
-              session.tags.length
-                ? session.tags.join(' · ')
-                : `上次连接 ${formatTimestamp(session.last_connected_at)}`
-            }}
-          </small>
-        </button>
-
-        <p v-if="!filteredSessions.length" class="empty-copy">
-          还没有已保存会话。先在下方填写草稿并保存，然后双击即可连接。
-        </p>
-      </div>
-
-      <section class="editor-card">
-        <div class="panel-head panel-head--tight">
-          <div>
-            <p class="eyebrow">会话草稿</p>
-            <h2>{{ form.id ? '编辑配置' : '快速连接草稿' }}</h2>
-          </div>
-          <div class="actions">
-            <button class="ghost danger" :disabled="busy || !selectedSessionId" @click="deleteSession">
-              删除
-            </button>
-            <button class="primary" :disabled="busy" @click="saveSession">保存</button>
-          </div>
-        </div>
-
-        <div class="editor-grid">
-          <label>
-            <span>名称</span>
-            <input v-model="form.name" placeholder="生产堡垒机" />
-          </label>
-          <label>
-            <span>主机</span>
-            <input v-model="form.host" placeholder="bastion.example.com" />
-          </label>
-          <label>
-            <span>端口</span>
-            <input v-model="form.port" inputmode="numeric" />
-          </label>
-          <label>
-            <span>用户名</span>
-            <input v-model="form.username" placeholder="root" />
-          </label>
-          <label>
-            <span>认证方式</span>
-            <select v-model="form.authType">
-              <option value="private-key">私钥</option>
-              <option value="agent">SSH 代理</option>
-              <option value="password">密码</option>
-            </select>
-          </label>
-          <label v-if="form.authType === 'private-key'">
-            <span>密钥路径</span>
-            <input v-model="form.keyPath" placeholder="~/.ssh/id_ed25519" />
-          </label>
-          <label v-else-if="form.authType === 'agent'">
-            <span>说明</span>
-            <input :value="'通过 SSH 代理认证'" disabled />
-          </label>
-          <label v-else>
-            <span>连接密码</span>
-            <input
-              v-model="connectSecret"
-              type="password"
-              autocomplete="off"
-              placeholder="输入 SSH 密码"
-            />
-          </label>
-        </div>
-
-        <div v-if="form.authType === 'password'" class="draft-secret-panel">
-          <label class="checkbox-row">
-            <input v-model="rememberSecret" type="checkbox" />
-            <span>连接成功前，将密码保存到系统钥匙串</span>
-          </label>
-          <p class="empty-copy">
-            现在可以直接在左侧输入密码，然后点击下方“{{ editorConnectLabel }}”。不需要先去中间区域输入。
-          </p>
-        </div>
-
-        <div class="stack compact-stack">
-          <label>
-            <span>标签</span>
-            <input v-model="form.tagsInput" placeholder="prod, ssh, eu-west" />
-          </label>
-          <label>
-            <span>远程书签</span>
-            <textarea v-model="form.remoteRootsInput" rows="4" placeholder="/home/root&#10;/var/www" />
-          </label>
-          <label>
-            <span>本地书签</span>
-            <textarea v-model="form.localRootsInput" rows="3" placeholder="/srv/app&#10;/var/log" />
-          </label>
-          <label>
-            <span>备注</span>
-            <textarea v-model="form.notes" rows="3" placeholder="跳板机、仅生产环境、密钥按月轮换" />
-          </label>
-        </div>
-
-        <div class="actions actions--spread">
-          <button class="ghost" :disabled="busy" @click="saveSession">
-            仅保存
-          </button>
-          <button class="primary" :disabled="busy" @click="saveAndConnectSession">
-            {{ editorConnectLabel }}
-          </button>
-        </div>
-      </section>
-    </aside>
+    <SessionSidebar
+      :loading="loading"
+      :busy="busy"
+      :selected-session-id="selectedSessionId"
+      :active-terminal-id="activeTerminalId"
+      :state="sessionSidebarState"
+      :filtered-sessions="filteredSessions"
+      :editor-connect-label="editorConnectLabel"
+      :on-start-new-session="startNewSession"
+      :on-load-sessions="loadSessions"
+      :on-select-session="selectSession"
+      :on-connect-session-from-list="connectSessionFromList"
+      :on-delete-session="deleteSession"
+      :on-save-session="saveSession"
+      :on-save-and-connect-session="saveAndConnectSession"
+      :format-timestamp="formatTimestamp"
+      :sync-label="syncLabel"
+    />
 
     <main class="workspace-shell">
       <header class="topbar">
@@ -2526,14 +3019,17 @@ onBeforeUnmount(() => {
             <span class="workspace-tab-status">{{ terminalStatusLabel(tab.status) }}</span>
             <span class="workspace-tab-close" @click.stop="closeTerminalTab(tab.sessionId)">×</span>
           </button>
-          <span class="workspace-caption">{{ selectedSessionSummary }}</span>
+          <span class="workspace-caption">
+            左侧草稿：{{ selectedSessionSummary }}
+            <template v-if="workspaceMismatch"> · 右侧工作区：{{ activeWorkspaceSummary }}</template>
+          </span>
         </div>
 
         <div class="actions toolbar-actions">
           <button class="ghost" :disabled="busy || !selectedSessionId" @click="connectTerminal">连接</button>
           <button class="ghost danger" :disabled="!activeTerminalId" @click="disconnectTerminal">断开</button>
-          <button class="ghost" :disabled="!selectedSessionId" @click="openDockTab('browser')">文件</button>
-          <button class="ghost" :disabled="!selectedSessionId" @click="openDockTab('editor')">编辑器</button>
+          <button class="ghost" :disabled="!activeWorkspaceSession" @click="openDockTab('browser')">文件</button>
+          <button class="ghost" :disabled="!activeWorkspaceSession" @click="openDockTab('editor')">编辑器</button>
           <button class="ghost" @click="openDockTab('queue')">队列</button>
           <button class="ghost" @click="openDockTab('activity')">活动</button>
           <button class="ghost" @click="openDockTab('hosts')">主机</button>
@@ -2541,509 +3037,177 @@ onBeforeUnmount(() => {
       </header>
 
       <section class="workspace-grid">
-        <section class="panel terminal-panel shell-panel">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">终端工作区</p>
-              <h2>{{ activeTerminalName || selectedSession?.name || '等待连接' }}</h2>
-              <p class="subcopy">
-                {{ activeTerminalId ? `当前已连接到 ${activeTerminalName}` : '选择一个书签并连接后，就会在这里打开实时终端。' }}
-              </p>
-            </div>
+        <TerminalPanel
+          :active-terminal-id="activeTerminalId"
+          :active-terminal-name="activeTerminalName"
+          :selected-session-id="selectedSessionId"
+          :selected-session-name="selectedSession?.name ?? null"
+          :selected-session-auth-label="selectedSessionAuthLabel"
+          :active-workspace-name="activeWorkspaceSession?.name ?? null"
+          :busy="busy"
+          :terminal-status="terminalStatus"
+          :credentials="terminalCredentialState"
+          :secret-prompt="secretPrompt"
+          :workspace-mismatch="workspaceMismatch"
+          :terminal-context-auth-label="terminalContextAuthLabel"
+          :terminal-context-tag-summary="terminalContextTagSummaryText"
+          :selected-session-summary="selectedSessionSummary"
+          :active-workspace-summary="activeWorkspaceSummary"
+          :selected-session-remote-root="selectedSessionRemoteRoot"
+          :terminal-context-remote-root="terminalContextRemoteRoot"
+          :sessions-count="sessions.length"
+          :queued-transfer-count="queuedTransferCount"
+          :known-hosts-count="knownHosts.length"
+          :running-transfer-count="runningTransferCount"
+          :failed-transfer-count="failedTransferCount"
+          :bind-terminal-host="bindTerminalHost"
+          :on-connect-terminal="connectTerminal"
+          :on-save-and-connect-session="saveAndConnectSession"
+          :on-open-dock-tab="openDockTab"
+          :on-save-current-secret="saveCurrentSecret"
+          :on-forget-saved-secret="forgetSavedSecret"
+          :terminal-status-label="terminalStatusLabel"
+        />
 
-            <div class="terminal-meta">
-              <span class="status-pill" :data-state="terminalStatus.toLowerCase()">{{ terminalStatusLabel(terminalStatus) }}</span>
-              <span class="badge">{{ selectedSessionAuthLabel }}</span>
-              <span v-if="selectedSession" class="badge">{{ selectedSessionTagSummary }}</span>
-            </div>
-          </div>
-
-          <div class="terminal-auth terminal-auth--toolbar">
-            <label>
-              <span>{{ secretPrompt }}</span>
-              <input
-                v-model="connectSecret"
-                type="password"
-                autocomplete="off"
-                :placeholder="secretPrompt"
-              />
-            </label>
-
-            <div class="actions">
-              <label class="checkbox-row">
-                <input v-model="rememberSecret" type="checkbox" />
-                <span>保存到系统钥匙串</span>
-              </label>
-              <button class="ghost" :disabled="!selectedSessionId || !connectSecret.trim()" @click="saveCurrentSecret">
-                保存凭据
-              </button>
-              <button class="ghost danger" :disabled="!selectedSessionId" @click="forgetSavedSecret">
-                忘记凭据
-              </button>
-            </div>
-          </div>
-
-          <div class="terminal-stack">
-            <div ref="terminalHost" class="terminal-host" :class="{ 'terminal-host--idle': !activeTerminalId }"></div>
-
-            <div v-if="!activeTerminalId" class="terminal-overlay">
-              <div class="terminal-empty">
-                <p class="eyebrow">连接中心</p>
-                <h3>{{ selectedSession?.name || '尚未选择会话' }}</h3>
-                <p>
-                  当前界面按终端优先的工作流组织：左侧选会话，点击连接，中间跑终端，右侧处理文件浏览和编辑。
-                </p>
-
-                <div class="actions">
-                  <button class="primary" :disabled="busy || !selectedSessionId" @click="connectTerminal">
-                    连接当前会话
-                  </button>
-                  <button class="ghost" :disabled="busy" @click="saveAndConnectSession">保存并连接</button>
-                  <button class="ghost" @click="openDockTab('browser')">打开 SSH 浏览器</button>
-                </div>
-
-                <div class="summary-grid">
-                  <div class="summary-card">
-                    <strong>{{ sessions.length }}</strong>
-                    <span>已保存会话</span>
-                  </div>
-                  <div class="summary-card">
-                    <strong>{{ queuedTransferCount }}</strong>
-                    <span>排队任务</span>
-                  </div>
-                  <div class="summary-card">
-                    <strong>{{ knownHosts.length }}</strong>
-                    <span>known_hosts 记录</span>
-                  </div>
-                  <div class="summary-card">
-                    <strong>{{ selectedSessionRemoteRoot }}</strong>
-                    <span>主远程目录</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="terminal-footer terminal-footer--cards">
-            <div class="terminal-foot-card">
-              <strong>连接目标</strong>
-              <p>{{ selectedSessionSummary }}</p>
-            </div>
-            <div class="terminal-foot-card">
-              <strong>远程根目录</strong>
-              <p>{{ selectedSessionRemoteRoot }}</p>
-            </div>
-            <div class="terminal-foot-card">
-              <strong>队列状态</strong>
-              <p>{{ runningTransferCount }} 个执行中 · {{ queuedTransferCount }} 个排队中 · {{ failedTransferCount }} 个失败</p>
-            </div>
-            <div class="terminal-foot-card">
-              <strong>终端标签</strong>
-              <p>{{ terminalTabs.length }} 个已打开 · {{ orderedTerminalTabs.filter((tab) => tab.status === 'Connected').length }} 个已连接</p>
-            </div>
-          </div>
-        </section>
-
-        <aside class="panel dock-panel">
-          <div class="dock-tabs">
-            <button
-              v-for="tab in dockTabs"
-              :key="tab.id"
-              class="dock-tab"
-              :class="{ active: activeDockTab === tab.id }"
-              @click="openDockTab(tab.id)"
-            >
-              {{ tab.label }}
-            </button>
-          </div>
-
-          <div v-if="activeDockTab === 'browser'" class="dock-pane">
-            <div class="panel-head panel-head--tight">
-              <div>
-                <p class="eyebrow">SSH 浏览器</p>
-                <h2>远程文件</h2>
-              </div>
-              <div class="actions">
-                <button class="ghost" :disabled="!selectedRemotePaths.length" @click="clearRemoteSelection">
-                  清空选择
-                </button>
-                <button class="ghost" :disabled="sftpBusy" @click="goToParentDirectory">上一级</button>
-                <button class="ghost" :disabled="sftpBusy || !selectedSessionId" @click="loadSftpDirectory()">
-                  刷新
-                </button>
-              </div>
-            </div>
-
-            <div class="sftp-toolbar">
-              <label>
-                <span>远程目录</span>
-                <input v-model="sftpPath" placeholder="/" />
-              </label>
-              <button class="primary" :disabled="sftpBusy || !selectedSessionId" @click="loadSftpDirectory()">
-                加载
-              </button>
-            </div>
-
-            <div class="browser-grid">
-              <div class="tree-panel">
-                <div class="section-title">
-                  <span>目录树</span>
-                  <span>{{ visibleRemoteTreeNodes.length }}</span>
-                </div>
-                <button
-                  v-for="node in visibleRemoteTreeNodes"
-                  :key="node.path"
-                  class="tree-node"
-                  :style="{ paddingLeft: `${12 + node.depth * 16}px` }"
-                  @click="openRemoteTreeNode(node)"
-                >
-                  <span class="tree-toggle" @click.stop="toggleRemoteTreeNode(node)">
-                    {{ node.loading ? '…' : node.expanded ? '▾' : '▸' }}
-                  </span>
-                  <span class="tree-label">{{ node.name }}</span>
-                </button>
-                <p v-if="!visibleRemoteTreeNodes.length" class="empty-copy">
-                  先保存至少一个远程书签，或连接后从 `/` 开始浏览。
-                </p>
-              </div>
-
-              <div class="sftp-list">
-                <div class="section-title">
-                  <span>当前目录</span>
-                  <span>{{ sftpEntries.length }}</span>
-                </div>
-                <button
-                  v-for="entry in sftpEntries"
-                  :key="entry.path"
-                  class="sftp-entry"
-                  @click="selectRemotePathForMutation(entry)"
-                  @dblclick="openRemoteEntry(entry)"
-                  @contextmenu="openRemoteContextMenu($event, { path: entry.path, name: entry.name, isDir: entry.is_dir })"
-                >
-                  <div class="sftp-entry-head">
-                    <label class="checkbox-row">
-                      <input
-                        :checked="isRemoteSelected(entry.path)"
-                        type="checkbox"
-                        @click.stop
-                        @change="toggleRemoteSelection(entry)"
-                      />
-                      <span>{{ entry.is_dir ? '目录' : '文件' }}</span>
-                    </label>
-                    <small>{{ formatFileSize(entry.size) }}</small>
-                  </div>
-                  <strong>{{ entry.name }}</strong>
-                  <small>{{ entry.path }}</small>
-                </button>
-                <p v-if="!sftpEntries.length" class="empty-copy">
-                  先连接到会话，右侧 SFTP 面板才会有内容。
-                </p>
-              </div>
-            </div>
-
-            <div class="dock-form-grid">
-              <label>
-                <span>新目录路径</span>
-                <input v-model="sftpCreatePath" placeholder="/tmp/new-folder" />
-              </label>
-              <label>
-                <span>远程路径</span>
-                <input v-model="remoteTransferPath" placeholder="/root/example.txt" />
-              </label>
-              <label>
-                <span>重命名目标</span>
-                <input v-model="sftpRenameTarget" placeholder="/root/example-renamed.txt" />
-              </label>
-              <label>
-                <span>本地路径</span>
-                <input v-model="localTransferPath" placeholder="/root/downloads/example.txt" />
-              </label>
-            </div>
-
-            <div class="actions dock-actions">
-              <button class="ghost" :disabled="sftpBusy" @click="createRemoteDirectory">创建目录</button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="chooseUploadLocalFile">选择文件</button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="chooseDownloadLocalPath">选择保存路径</button>
-              <button class="ghost" :disabled="sftpBusy" @click="renameRemotePath">重命名</button>
-              <button class="ghost danger" :disabled="sftpBusy" @click="deleteRemotePath">删除</button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="queueDownloadJob">加入下载队列</button>
-              <button class="ghost" :disabled="sftpBusy || queueRunning" @click="queueUploadJob">加入上传队列</button>
-              <button class="ghost" :disabled="queueRunning || sftpBusy || !selectedSessionId" @click="batchQueueUploads">批量上传</button>
-              <button class="ghost" :disabled="!selectedRemotePaths.length || sftpBusy" @click="batchQueueDownloads">批量下载</button>
-              <button class="ghost danger" :disabled="!selectedRemotePaths.length || sftpBusy" @click="batchDeleteSelectedRemote">批量删除</button>
-              <button class="ghost" :disabled="sftpBusy" @click="downloadSelectedRemoteFile">下载</button>
-              <button class="primary" :disabled="sftpBusy" @click="uploadLocalFile">上传</button>
-            </div>
-          </div>
-
-          <div v-else-if="activeDockTab === 'editor'" class="dock-pane">
-            <div class="panel-head panel-head--tight">
-              <div>
-                <p class="eyebrow">远程编辑器</p>
-                <h2>{{ remoteEditorTitle }}</h2>
-              </div>
-              <div class="actions">
-                <button class="ghost" :disabled="remoteEditorLoading || !remoteTransferPath" @click="openRemoteTextFile()">
-                  载入
-                </button>
-                <button class="ghost" :disabled="remoteEditorLoading || !remoteEditorPath" @click="openRemoteTextFile(remoteEditorPath)">
-                  重新载入
-                </button>
-                <button class="primary" :disabled="remoteEditorLoading || !remoteEditorDirty" @click="saveRemoteTextFile">
-                  保存到远程
-                </button>
-              </div>
-            </div>
-
-            <div class="dock-form-grid">
-              <label>
-                <span>远程文本路径</span>
-                <input v-model="remoteTransferPath" placeholder="/etc/nginx/nginx.conf" />
-              </label>
-              <label>
-                <span>编辑状态</span>
-                <input
-                  :value="
-                    remoteEditorLoading
-                      ? '加载中…'
-                      : remoteEditorPath
-                        ? remoteEditorDirty
-                          ? '已修改'
-                          : '已同步'
-                        : '尚未载入文件'
-                  "
-                  disabled
-                />
-              </label>
-            </div>
-
-            <label class="editor-surface">
-              <span>UTF-8 文本缓冲区</span>
-              <textarea
-                v-model="remoteEditorContent"
-                rows="20"
-                :disabled="remoteEditorLoading || !remoteEditorPath"
-                placeholder="在 SSH 浏览器里双击一个远程文件，就会加载到这里。"
-              />
-            </label>
-
-            <p class="empty-copy">
-              这个内联编辑器主要适合配置文件和脚本。非 UTF-8 文件或较大的二进制文件仍然建议通过下载/上传处理。
-            </p>
-          </div>
-
-          <div v-else-if="activeDockTab === 'queue'" class="dock-pane">
-            <div class="panel-head panel-head--tight">
-              <div>
-                <p class="eyebrow">传输队列</p>
-                <h2>顺序任务</h2>
-              </div>
-              <div class="actions">
-                <button class="ghost" :disabled="queueRunning || !transferQueue.length" @click="runTransferQueue">
-                  {{ queueRunning ? '运行中...' : '运行队列' }}
-                </button>
-                <button class="ghost" :disabled="!queueRunning" @click="requestQueueStop">当前任务后停止</button>
-                <button class="ghost" :disabled="!transferQueue.length" @click="clearCompletedTransfers">
-                  清理已完成
-                </button>
-              </div>
-            </div>
-
-            <div class="settings-grid">
-              <label class="checkbox-row">
-                <input v-model="autoResumeQueue" type="checkbox" @change="persistAutoResumeQueueSetting" />
-                <span>启动时自动恢复</span>
-              </label>
-              <label class="checkbox-row">
-                <input v-model="backgroundOnClose" type="checkbox" @change="persistBackgroundOnCloseSetting" />
-                <span>关闭时最小化到托盘</span>
-              </label>
-              <label class="checkbox-row">
-                <input v-model="enableNotifications" type="checkbox" @change="persistNotificationSetting" />
-                <span>系统通知</span>
-              </label>
-              <label class="checkbox-row">
-                <input v-model="autoRetryTransfers" type="checkbox" @change="persistAutoRetrySettings" />
-                <span>瞬时失败自动重试</span>
-              </label>
-              <label class="checkbox-row">
-                <input v-model="autoRemoveSuccessfulJobs" type="checkbox" @change="persistTransferBehaviorSettings" />
-                <span>自动移除成功任务</span>
-              </label>
-              <label>
-                <span>重试次数</span>
-                <input v-model="defaultMaxRetries" type="number" min="0" max="9" @change="persistAutoRetrySettings" />
-              </label>
-              <label>
-                <span>基础延迟</span>
-                <input v-model="retryBaseDelaySeconds" type="number" min="1" max="60" @change="persistTransferBehaviorSettings" />
-              </label>
-              <label>
-                <span>最大延迟</span>
-                <input v-model="retryMaxDelaySeconds" type="number" min="1" max="300" @change="persistTransferBehaviorSettings" />
-              </label>
-            </div>
-
-            <div v-if="transferQueue.length" class="queue-list">
-              <div v-for="job in transferQueue" :key="job.id" class="queue-item">
-                <div class="queue-item-head">
-                  <strong>{{ transferKindLabel(job.kind) }}</strong>
-                  <span class="badge">{{ transferStatusLabel(job.status) }}</span>
-                </div>
-                <span>{{ job.remotePath }}</span>
-                <small>{{ job.localPath }}</small>
-                <small>第 {{ job.attemptCount }} / {{ job.maxRetries + 1 }} 次尝试</small>
-                <small>{{ job.message }}</small>
-                <div v-if="job.status === 'running'" class="queue-progress">
-                  <div
-                    class="queue-progress-bar"
-                    :style="{ width: `${job.total ? Math.min(100, Math.round(((job.transferred ?? 0) / job.total) * 100)) : 15}%` }"
-                  ></div>
-                </div>
-                <div class="actions">
-                  <button class="ghost" :disabled="job.status === 'running'" @click="retryTransferJob(job.id)">
-                    重试
-                  </button>
-                  <button class="ghost danger" :disabled="job.status !== 'running'" @click="cancelRunningTransfer(job.id)">
-                    取消
-                  </button>
-                  <button class="ghost danger" :disabled="job.status === 'running'" @click="removeTransferJob(job.id)">
-                    移除
-                  </button>
-                </div>
-              </div>
-            </div>
-            <p v-else class="empty-copy">
-              上传和下载任务会在这里按顺序执行，作为右侧停靠的传输面板。
-            </p>
-          </div>
-
-          <div v-else-if="activeDockTab === 'activity'" class="dock-pane">
-            <div class="panel-head panel-head--tight">
-              <div>
-                <p class="eyebrow">传输活动</p>
-                <h2>最近事件</h2>
-              </div>
-              <div class="actions">
-                <button class="ghost" @click="loadTransferEvents">刷新</button>
-                <button class="ghost danger" :disabled="!transferEvents.length" @click="clearTransferEvents">
-                  清空日志
-                </button>
-              </div>
-            </div>
-
-            <div class="settings-grid">
-              <label>
-                <span>搜索</span>
-                <input v-model="transferEventQuery" placeholder="任务 ID、消息、会话 ID" />
-              </label>
-              <label>
-                <span>级别</span>
-                <select v-model="transferEventLevelFilter">
-                  <option value="all">全部</option>
-                  <option value="info">信息</option>
-                  <option value="warning">警告</option>
-                  <option value="error">错误</option>
-                </select>
-              </label>
-            </div>
-
-            <div class="known-hosts-list">
-              <div v-for="event in visibleTransferEvents" :key="event.id" class="known-host-entry">
-                <strong>{{ transferLevelLabel(event.level) }} · {{ event.job_id }}</strong>
-                <span>{{ event.message }}</span>
-                <small>{{ formatTimestamp(event.created_at) }}</small>
-              </div>
-              <p v-if="!visibleTransferEvents.length" class="empty-copy">
-                还没有传输事件记录。
-              </p>
-            </div>
-          </div>
-
-          <div v-else class="dock-pane">
-            <div class="panel-head panel-head--tight">
-              <div>
-                <p class="eyebrow">主机信任</p>
-                <h2>known_hosts</h2>
-              </div>
-              <div class="actions">
-                <button class="ghost" @click="loadKnownHosts">刷新</button>
-                <button class="ghost danger" :disabled="!selectedSessionId" @click="forgetSelectedSessionKnownHost">
-                  忘记当前主机
-                </button>
-              </div>
-            </div>
-
-            <div class="known-hosts-list">
-              <div v-for="entry in knownHosts" :key="entry.line" class="known-host-entry">
-                <strong>#{{ entry.line }} · {{ entry.key_type }}</strong>
-                <span>{{ entry.hosts }}</span>
-                <small>{{ entry.hashed ? '已哈希主机模式' : '明文主机模式' }}</small>
-                <div class="actions">
-                  <button class="ghost danger" @click="removeKnownHostLine(entry)">删除</button>
-                </div>
-              </div>
-              <p v-if="!knownHosts.length" class="empty-copy">
-                当前用户还没有 known_hosts 记录。
-              </p>
-            </div>
-          </div>
-        </aside>
+        <WorkspaceDock
+          :active-dock-tab="activeDockTab"
+          :dock-tabs="dockTabs"
+          :active-workspace-session="activeWorkspaceSession"
+          :active-workspace-summary="activeWorkspaceSummary"
+          :workspace-mismatch="workspaceMismatch"
+          :selected-session-name="selectedSession?.name ?? null"
+          :has-known-host-target="hasKnownHostTarget"
+          :known-host-target-name="knownHostTargetName"
+          :known-host-target-scope-label="knownHostTargetScopeLabel"
+          :state="workspaceDockState"
+          :visible-remote-tree-nodes="visibleRemoteTreeNodes"
+          :selected-remote-paths="selectedRemotePaths"
+          :sftp-busy="sftpBusy"
+          :sftp-entries="sftpEntries"
+          :remote-drop-active="remoteDropActive"
+          :remote-drop-summary="remoteDropSummary"
+          :remote-drop-hint="remoteDropHint"
+          :remote-editor-title="remoteEditorTitle"
+          :remote-editor-loading="remoteEditorLoading"
+          :remote-editor-path="remoteEditorPath"
+          :remote-editor-dirty="remoteEditorDirty"
+          :transfer-queue="transferQueue"
+          :queue-running="queueRunning"
+          :transfer-events="transferEvents"
+          :visible-transfer-events="visibleTransferEvents"
+          :known-hosts="knownHosts"
+          :on-open-dock-tab="openDockTab"
+          :bind-remote-drop-zone="bindRemoteDropZone"
+          :on-select-all-remote-entries="selectAllRemoteEntries"
+          :on-clear-remote-selection="clearRemoteSelection"
+          :on-go-to-parent-directory="goToParentDirectory"
+          :on-load-sftp-directory="loadSftpDirectory"
+          :on-open-remote-tree-node="openRemoteTreeNode"
+          :on-toggle-remote-tree-node="toggleRemoteTreeNode"
+          :on-select-remote-path-for-mutation="selectRemotePathForMutation"
+          :on-open-remote-entry="openRemoteEntry"
+          :on-open-remote-context-menu="openRemoteContextMenu"
+          :on-toggle-remote-selection="toggleRemoteSelection"
+          :on-create-remote-directory="createRemoteDirectory"
+          :on-choose-upload-local-file="chooseUploadLocalFile"
+          :on-choose-upload-local-directory="chooseUploadLocalDirectory"
+          :on-choose-download-local-path="chooseDownloadLocalPath"
+          :on-rename-remote-path="renameRemotePath"
+          :on-delete-remote-path="deleteRemotePath"
+          :on-queue-download-job="queueDownloadJob"
+          :on-queue-upload-job="queueUploadJob"
+          :on-batch-queue-uploads="batchQueueUploads"
+          :on-batch-queue-downloads="batchQueueDownloads"
+          :on-batch-delete-selected-remote="batchDeleteSelectedRemote"
+          :on-download-selected-remote-file="downloadSelectedRemoteFile"
+          :on-upload-local-file="uploadLocalFile"
+          :on-open-remote-text-file="openRemoteTextFile"
+          :on-save-remote-text-file="saveRemoteTextFile"
+          :on-run-transfer-queue="runTransferQueue"
+          :on-request-queue-stop="requestQueueStop"
+          :on-clear-completed-transfers="clearCompletedTransfers"
+          :on-persist-auto-resume-queue-setting="persistAutoResumeQueueSetting"
+          :on-persist-background-on-close-setting="persistBackgroundOnCloseSetting"
+          :on-persist-notification-setting="persistNotificationSetting"
+          :on-persist-auto-retry-settings="persistAutoRetrySettings"
+          :on-persist-transfer-behavior-settings="persistTransferBehaviorSettings"
+          :on-retry-transfer-job="retryTransferJob"
+          :on-cancel-running-transfer="cancelRunningTransfer"
+          :on-remove-transfer-job="removeTransferJob"
+          :on-load-transfer-events="loadTransferEvents"
+          :on-clear-transfer-events="clearTransferEvents"
+          :on-load-known-hosts="loadKnownHosts"
+          :on-forget-known-host-target="forgetKnownHostTarget"
+          :on-remove-known-host-line="removeKnownHostLine"
+          :format-file-size="formatFileSize"
+          :session-name-for-id="sessionNameForId"
+          :transfer-kind-label="transferKindLabel"
+          :transfer-status-label="transferStatusLabel"
+          :transfer-level-label="transferLevelLabel"
+          :format-timestamp="formatTimestamp"
+          :is-remote-selected="isRemoteSelected"
+        />
       </section>
 
       <footer class="status-bar">
         <span>{{ statusLine }}</span>
-        <span>{{ selectedSession ? `当前会话：${selectedSession.name}` : '尚未选择已保存会话' }}</span>
+        <span>{{ selectedSession ? `左侧草稿：${selectedSession.name}` : '左侧还没有选中会话' }}</span>
+        <span>{{ activeWorkspaceSession ? `右侧工作区：${activeWorkspaceSession.name}` : '右侧工作区未连接' }}</span>
         <span>{{ runningTransferCount }} 个执行中 · {{ queuedTransferCount }} 个排队中 · {{ failedTransferCount }} 个失败</span>
       </footer>
     </main>
 
     <div
       v-if="remoteContextMenu"
-      style="position:fixed;inset:0;z-index:999"
+      class="remote-context-layer"
       @click="closeRemoteContextMenu"
       @contextmenu.prevent="closeRemoteContextMenu"
     >
       <div
-        class="panel"
+        class="panel remote-context-menu"
         :style="{
-          position: 'fixed',
           left: remoteContextMenu.x + 'px',
-          top: remoteContextMenu.y + 'px',
-          zIndex: 1000,
-          padding: '8px 0',
-          minWidth: '180px',
-          borderRadius: '14px'
+          top: remoteContextMenu.y + 'px'
         }"
+        @click.stop
       >
+        <div class="remote-context-head">
+          <strong>{{ remoteContextSelectionLabel }}</strong>
+          <small>{{ remoteContextSelectionMeta }}</small>
+        </div>
         <button
           v-if="remoteContextMenu.target.isDir"
-          class="ghost"
-          style="width:100%;text-align:left;border-radius:0;border:none;"
-          @click="loadSftpDirectory(remoteContextMenu.target.path); closeRemoteContextMenu()"
+          class="ghost remote-context-item"
+          @click="openContextMenuDirectory"
         >打开目录</button>
         <button
           v-if="!remoteContextMenu.target.isDir"
-          class="ghost"
-          style="width:100%;text-align:left;border-radius:0;border:none;"
-          @click="openRemoteTextFile(remoteContextMenu.target.path); closeRemoteContextMenu()"
+          class="ghost remote-context-item"
+          @click="openContextMenuEditor"
         >在编辑器中打开</button>
         <button
           v-if="!remoteContextMenu.target.isDir"
-          class="ghost"
-          style="width:100%;text-align:left;border-radius:0;border:none;"
-          @click="remoteTransferPath = remoteContextMenu.target.path; localTransferPath = remoteContextMenu.target.name; activeDockTab = 'browser'; closeRemoteContextMenu()"
+          class="ghost remote-context-item"
+          @click="prepareContextMenuDownloadSource"
         >选为下载源</button>
         <button
-          class="ghost"
-          style="width:100%;text-align:left;border-radius:0;border:none;"
-          @click="sftpRenameTarget = remoteContextMenu.target.path; remoteTransferPath = remoteContextMenu.target.path; closeRemoteContextMenu()"
+          v-if="remoteContextSelectionCount > 0"
+          class="ghost remote-context-item"
+          @click="queueContextMenuDownloads"
+        >{{ remoteContextQueueDownloadLabel }}</button>
+        <button
+          class="ghost remote-context-item"
+          @click="prepareContextMenuRename"
         >重命名</button>
         <button
-          class="ghost danger"
-          style="width:100%;text-align:left;border-radius:0;border:none;"
-          @click="remoteTransferPath = remoteContextMenu.target.path; remoteTransferIsDir = remoteContextMenu.target.isDir; deleteRemotePath(); closeRemoteContextMenu()"
-        >删除</button>
+          class="ghost danger remote-context-item"
+          @click="deleteContextMenuSelection"
+        >{{ remoteContextDeleteLabel }}</button>
+        <button
+          v-if="selectedRemotePaths.length"
+          class="ghost remote-context-item"
+          @click="clearRemoteSelectionFromContextMenu"
+        >清空选择</button>
       </div>
     </div>
   </div>

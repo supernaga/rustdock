@@ -3,64 +3,10 @@ use crate::ssh::{connect_authenticated, TrustOnFirstUseHandler};
 use anyhow::{anyhow, Context, Result};
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Instant;
-use tokio::fs::File as TokioFile;
+use std::path::{Path, PathBuf};
+use tokio::fs::{self, File as TokioFile};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{watch, Mutex};
-
-/// Cached SFTP session entry with creation timestamp for TTL eviction.
-struct CachedSftpEntry {
-    created_at: Instant,
-}
-
-/// Thread-safe cache for SFTP sessions keyed by session ID.
-/// Entries are evicted after `ttl_seconds`.
-#[derive(Clone)]
-pub struct SftpSessionCache {
-    entries: Arc<Mutex<HashMap<String, CachedSftpEntry>>>,
-    ttl_seconds: u64,
-}
-
-impl SftpSessionCache {
-    pub fn new(ttl_seconds: u64) -> Self {
-        Self {
-            entries: Arc::new(Mutex::new(HashMap::new())),
-            ttl_seconds,
-        }
-    }
-
-    /// Get a cached SFTP session or create a new one.
-    pub async fn get_or_connect(
-        &self,
-        profile: &SessionProfile,
-        secret: Option<&str>,
-    ) -> Result<SftpSession> {
-        let session_id = profile.id.clone();
-
-        // The russh SFTP session handle is not Clone, so keep only recent activity metadata
-        // here for now and open a fresh session on demand.
-        {
-            let mut entries = self.entries.lock().await;
-            entries.retain(|_, entry| entry.created_at.elapsed().as_secs() < self.ttl_seconds);
-        }
-
-        let (sftp, _driver) = open_sftp_raw(profile.clone(), secret).await?;
-
-        let mut entries = self.entries.lock().await;
-        entries.insert(session_id, CachedSftpEntry { created_at: Instant::now() });
-
-        Ok(sftp)
-    }
-
-    /// Remove a cached session (e.g., on disconnect).
-    pub async fn invalidate(&self, session_id: &str) {
-        let mut entries = self.entries.lock().await;
-        entries.remove(session_id);
-    }
-}
+use tokio::sync::watch;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RemoteDirEntry {
@@ -99,9 +45,34 @@ pub struct RemoteTextFile {
 pub struct TransferProgress {
     pub transferred: u64,
     pub total: Option<u64>,
+    pub current_path: Option<String>,
+    pub completed_files: Option<usize>,
+    pub total_files: Option<usize>,
 }
 
 const MAX_TEXT_FILE_BYTES: u64 = 1024 * 1024;
+
+struct RemoteDirectoryPlan {
+    directories: Vec<PathBuf>,
+    files: Vec<RemoteFileTransfer>,
+    total_bytes: u64,
+}
+
+struct RemoteFileTransfer {
+    remote_path: String,
+    local_path: PathBuf,
+}
+
+struct LocalDirectoryPlan {
+    directories: Vec<String>,
+    files: Vec<LocalFileTransfer>,
+    total_bytes: u64,
+}
+
+struct LocalFileTransfer {
+    local_path: PathBuf,
+    remote_path: String,
+}
 
 pub async fn list_remote_dir(
     profile: SessionProfile,
@@ -152,8 +123,7 @@ pub async fn download_remote_file(
     local_path: String,
     secret: Option<String>,
 ) -> Result<TransferResult> {
-    download_remote_file_with_progress(profile, remote_path, local_path, secret, None, |_| {})
-        .await
+    download_remote_file_with_progress(profile, remote_path, local_path, secret, None, |_| {}).await
 }
 
 pub async fn download_remote_file_with_progress<F>(
@@ -226,7 +196,10 @@ where
     F: FnMut(TransferProgress) + Send,
 {
     let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    let total = tokio::fs::metadata(&local_path).await.ok().map(|metadata| metadata.len());
+    let total = tokio::fs::metadata(&local_path)
+        .await
+        .ok()
+        .map(|metadata| metadata.len());
     let mut local_file = TokioFile::open(&local_path)
         .await
         .with_context(|| format!("failed to open local file {local_path}"))?;
@@ -248,6 +221,174 @@ where
     Ok(TransferResult {
         path: remote_path,
         bytes,
+    })
+}
+
+pub async fn download_remote_directory_with_progress<F>(
+    profile: SessionProfile,
+    remote_path: String,
+    local_path: String,
+    secret: Option<String>,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    mut on_progress: F,
+) -> Result<TransferResult>
+where
+    F: FnMut(TransferProgress) + Send,
+{
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
+    let directory = sftp.canonicalize(&remote_path).await.unwrap_or(remote_path);
+    let plan = build_remote_directory_plan(&sftp, &directory, PathBuf::from(&local_path)).await?;
+    let total_files = plan.files.len();
+
+    on_progress(TransferProgress {
+        transferred: 0,
+        total: Some(plan.total_bytes),
+        current_path: None,
+        completed_files: Some(0),
+        total_files: Some(total_files),
+    });
+
+    for directory_path in &plan.directories {
+        ensure_not_cancelled(cancel_rx.as_ref())?;
+        fs::create_dir_all(directory_path).await.with_context(|| {
+            format!(
+                "failed to create local directory {}",
+                directory_path.display()
+            )
+        })?;
+    }
+
+    let mut transferred = 0_u64;
+    let mut completed_files = 0_usize;
+    for file in plan.files {
+        ensure_not_cancelled(cancel_rx.as_ref())?;
+        if let Some(parent) = file.local_path.parent() {
+            fs::create_dir_all(parent).await.with_context(|| {
+                format!("failed to create local directory {}", parent.display())
+            })?;
+        }
+
+        let mut remote_file = sftp
+            .open(&file.remote_path)
+            .await
+            .with_context(|| format!("failed to open remote file {}", file.remote_path))?;
+        let mut local_file = TokioFile::create(&file.local_path).await.with_context(|| {
+            format!("failed to create local file {}", file.local_path.display())
+        })?;
+
+        on_progress(TransferProgress {
+            transferred,
+            total: Some(plan.total_bytes),
+            current_path: Some(file.remote_path.clone()),
+            completed_files: Some(completed_files),
+            total_files: Some(total_files),
+        });
+
+        copy_with_aggregate_progress(
+            &mut remote_file,
+            &mut local_file,
+            plan.total_bytes,
+            cancel_rx.clone(),
+            &mut transferred,
+            &file.remote_path,
+            completed_files,
+            total_files,
+            &mut on_progress,
+        )
+        .await
+        .with_context(|| format!("failed to download remote file {}", file.remote_path))?;
+        completed_files += 1;
+    }
+
+    on_progress(TransferProgress {
+        transferred,
+        total: Some(plan.total_bytes),
+        current_path: None,
+        completed_files: Some(completed_files),
+        total_files: Some(total_files),
+    });
+
+    Ok(TransferResult {
+        path: local_path,
+        bytes: transferred,
+    })
+}
+
+pub async fn upload_local_directory_with_progress<F>(
+    profile: SessionProfile,
+    local_path: String,
+    remote_path: String,
+    secret: Option<String>,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    mut on_progress: F,
+) -> Result<TransferResult>
+where
+    F: FnMut(TransferProgress) + Send,
+{
+    let plan = build_local_directory_plan(PathBuf::from(&local_path), remote_path.clone()).await?;
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
+    let total_files = plan.files.len();
+
+    on_progress(TransferProgress {
+        transferred: 0,
+        total: Some(plan.total_bytes),
+        current_path: None,
+        completed_files: Some(0),
+        total_files: Some(total_files),
+    });
+
+    for directory in &plan.directories {
+        ensure_not_cancelled(cancel_rx.as_ref())?;
+        ensure_remote_dir_all(&sftp, directory).await?;
+    }
+
+    let mut transferred = 0_u64;
+    let mut completed_files = 0_usize;
+    for file in plan.files {
+        ensure_not_cancelled(cancel_rx.as_ref())?;
+        let mut local_file = TokioFile::open(&file.local_path)
+            .await
+            .with_context(|| format!("failed to open local file {}", file.local_path.display()))?;
+        let mut remote_file = sftp
+            .create(&file.remote_path)
+            .await
+            .with_context(|| format!("failed to create remote file {}", file.remote_path))?;
+
+        on_progress(TransferProgress {
+            transferred,
+            total: Some(plan.total_bytes),
+            current_path: Some(file.remote_path.clone()),
+            completed_files: Some(completed_files),
+            total_files: Some(total_files),
+        });
+
+        copy_with_aggregate_progress(
+            &mut local_file,
+            &mut remote_file,
+            plan.total_bytes,
+            cancel_rx.clone(),
+            &mut transferred,
+            &file.remote_path,
+            completed_files,
+            total_files,
+            &mut on_progress,
+        )
+        .await
+        .with_context(|| format!("failed to upload local file {}", file.local_path.display()))?;
+        completed_files += 1;
+    }
+
+    on_progress(TransferProgress {
+        transferred,
+        total: Some(plan.total_bytes),
+        current_path: None,
+        completed_files: Some(completed_files),
+        total_files: Some(total_files),
+    });
+
+    Ok(TransferResult {
+        path: remote_path,
+        bytes: transferred,
     })
 }
 
@@ -356,9 +497,7 @@ pub async fn delete_remote_path(
 ) -> Result<MutationResult> {
     let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
     if is_dir {
-        sftp.remove_dir(&remote_path)
-            .await
-            .with_context(|| format!("failed to remove remote directory {remote_path}"))?;
+        delete_remote_directory_recursive(&sftp, &remote_path).await?;
     } else {
         sftp.remove_file(&remote_path)
             .await
@@ -366,6 +505,64 @@ pub async fn delete_remote_path(
     }
 
     Ok(MutationResult { path: remote_path })
+}
+
+async fn delete_remote_directory_recursive(sftp: &SftpSession, remote_root: &str) -> Result<()> {
+    let metadata = sftp
+        .metadata(remote_root)
+        .await
+        .with_context(|| format!("failed to stat remote directory {remote_root}"))?;
+    if !metadata.is_dir() {
+        return Err(anyhow!("remote path {remote_root} is not a directory"));
+    }
+
+    let mut stack = vec![(remote_root.to_string(), false)];
+
+    while let Some((remote_dir, visited)) = stack.pop() {
+        if visited {
+            sftp.remove_dir(&remote_dir)
+                .await
+                .with_context(|| format!("failed to remove remote directory {remote_dir}"))?;
+            continue;
+        }
+
+        stack.push((remote_dir.clone(), true));
+
+        let entries = sftp
+            .read_dir(remote_dir.clone())
+            .await
+            .with_context(|| format!("failed to list remote directory {remote_dir}"))?;
+        let mut child_directories = Vec::new();
+        let mut child_files = Vec::new();
+
+        for entry in entries {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+
+            let child_path = join_remote_path(&remote_dir, &name);
+            if entry.file_type().is_dir() {
+                child_directories.push(child_path);
+            } else {
+                child_files.push(child_path);
+            }
+        }
+
+        child_files.sort();
+        for child_file in child_files {
+            sftp.remove_file(&child_file)
+                .await
+                .with_context(|| format!("failed to remove remote file {child_file}"))?;
+        }
+
+        child_directories.sort();
+        for child_directory in child_directories.into_iter().rev() {
+            stack.push((child_directory, false));
+        }
+    }
+
+    Ok(())
 }
 
 async fn open_sftp_raw(
@@ -406,6 +603,191 @@ fn join_remote_path(directory: &str, name: &str) -> String {
     }
 }
 
+async fn build_remote_directory_plan(
+    sftp: &SftpSession,
+    remote_root: &str,
+    local_root: PathBuf,
+) -> Result<RemoteDirectoryPlan> {
+    let metadata = sftp
+        .metadata(remote_root)
+        .await
+        .with_context(|| format!("failed to stat remote directory {remote_root}"))?;
+    if !metadata.is_dir() {
+        return Err(anyhow!("remote path {remote_root} is not a directory"));
+    }
+
+    let mut directories = vec![local_root.clone()];
+    let mut files = Vec::new();
+    let mut total_bytes = 0_u64;
+    let mut stack = vec![(remote_root.to_string(), local_root)];
+
+    while let Some((remote_dir, local_dir)) = stack.pop() {
+        let entries = sftp
+            .read_dir(remote_dir.clone())
+            .await
+            .with_context(|| format!("failed to list remote directory {remote_dir}"))?;
+        let mut child_directories = Vec::new();
+
+        for entry in entries {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+
+            let remote_path = join_remote_path(&remote_dir, &name);
+            let local_path = local_dir.join(&name);
+            if entry.file_type().is_dir() {
+                child_directories.push((remote_path, local_path));
+            } else {
+                total_bytes += entry.metadata().len();
+                files.push(RemoteFileTransfer {
+                    remote_path,
+                    local_path,
+                });
+            }
+        }
+
+        child_directories.sort_by(|left, right| left.0.cmp(&right.0));
+        for (remote_path, local_path) in child_directories.into_iter().rev() {
+            directories.push(local_path.clone());
+            stack.push((remote_path, local_path));
+        }
+    }
+
+    files.sort_by(|left, right| left.remote_path.cmp(&right.remote_path));
+
+    Ok(RemoteDirectoryPlan {
+        directories,
+        files,
+        total_bytes,
+    })
+}
+
+async fn build_local_directory_plan(
+    local_root: PathBuf,
+    remote_root: String,
+) -> Result<LocalDirectoryPlan> {
+    let metadata = fs::metadata(&local_root)
+        .await
+        .with_context(|| format!("failed to stat local directory {}", local_root.display()))?;
+    if !metadata.is_dir() {
+        return Err(anyhow!(
+            "local path {} is not a directory",
+            local_root.display()
+        ));
+    }
+
+    let mut directories = vec![remote_root.clone()];
+    let mut files = Vec::new();
+    let mut total_bytes = 0_u64;
+    let mut stack = vec![(local_root, remote_root)];
+
+    while let Some((local_dir, remote_dir)) = stack.pop() {
+        let mut entries = fs::read_dir(&local_dir)
+            .await
+            .with_context(|| format!("failed to read local directory {}", local_dir.display()))?;
+        let mut child_directories = Vec::new();
+
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .with_context(|| format!("failed to read local directory {}", local_dir.display()))?
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "." || name == ".." {
+                continue;
+            }
+
+            let file_type = entry.file_type().await.with_context(|| {
+                format!("failed to inspect local path {}", entry.path().display())
+            })?;
+            let local_path = entry.path();
+            let remote_path = join_remote_path(&remote_dir, &name);
+
+            if file_type.is_dir() {
+                directories.push(remote_path.clone());
+                child_directories.push((local_path, remote_path));
+            } else if file_type.is_file() {
+                total_bytes += entry
+                    .metadata()
+                    .await
+                    .with_context(|| {
+                        format!("failed to inspect local file {}", local_path.display())
+                    })?
+                    .len();
+                files.push(LocalFileTransfer {
+                    local_path,
+                    remote_path,
+                });
+            } else {
+                return Err(anyhow!(
+                    "unsupported local entry type at {}",
+                    local_path.display()
+                ));
+            }
+        }
+
+        child_directories.sort_by(|left, right| left.0.cmp(&right.0));
+        for child in child_directories.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+
+    files.sort_by(|left, right| left.remote_path.cmp(&right.remote_path));
+
+    Ok(LocalDirectoryPlan {
+        directories,
+        files,
+        total_bytes,
+    })
+}
+
+async fn ensure_remote_dir_all(sftp: &SftpSession, remote_path: &str) -> Result<()> {
+    let normalized = remote_path.trim();
+    if normalized.is_empty() || normalized == "/" {
+        return Ok(());
+    }
+
+    let is_absolute = normalized.starts_with('/');
+    let mut current = if is_absolute {
+        "/".to_string()
+    } else {
+        String::new()
+    };
+
+    for segment in normalized.split('/').filter(|segment| !segment.is_empty()) {
+        current = if current.is_empty() {
+            segment.to_string()
+        } else if current == "/" {
+            format!("/{segment}")
+        } else {
+            format!("{current}/{segment}")
+        };
+
+        if let Err(create_error) = sftp.create_dir(current.clone()).await {
+            let create_error_message = create_error.to_string();
+            let metadata = sftp.metadata(&current).await.with_context(|| {
+                format!("failed to create remote directory {current}: {create_error_message}")
+            })?;
+            if !metadata.is_dir() {
+                return Err(anyhow!(
+                    "remote path {current} exists but is not a directory"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_not_cancelled(cancel_rx: Option<&watch::Receiver<bool>>) -> Result<()> {
+    if cancel_rx.is_some_and(|receiver| *receiver.borrow()) {
+        return Err(anyhow!("transfer cancelled"));
+    }
+
+    Ok(())
+}
+
 async fn copy_with_progress<R, W, F>(
     reader: &mut R,
     writer: &mut W,
@@ -420,7 +802,13 @@ where
 {
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut transferred = 0_u64;
-    on_progress(TransferProgress { transferred, total });
+    on_progress(TransferProgress {
+        transferred,
+        total,
+        current_path: None,
+        completed_files: None,
+        total_files: None,
+    });
 
     loop {
         if let Some(receiver) = cancel_rx.as_mut() {
@@ -437,8 +825,112 @@ where
 
         writer.write_all(&buffer[..read]).await?;
         transferred += read as u64;
-        on_progress(TransferProgress { transferred, total });
+        on_progress(TransferProgress {
+            transferred,
+            total,
+            current_path: None,
+            completed_files: None,
+            total_files: None,
+        });
     }
 
     Ok(transferred)
+}
+
+async fn copy_with_aggregate_progress<R, W, F>(
+    reader: &mut R,
+    writer: &mut W,
+    total: u64,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    transferred: &mut u64,
+    current_path: &str,
+    completed_files: usize,
+    total_files: usize,
+    on_progress: &mut F,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnMut(TransferProgress),
+{
+    let mut buffer = vec![0_u8; 64 * 1024];
+
+    loop {
+        ensure_not_cancelled(cancel_rx.as_ref())?;
+
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            writer.flush().await?;
+            break;
+        }
+
+        writer.write_all(&buffer[..read]).await?;
+        *transferred += read as u64;
+        on_progress(TransferProgress {
+            transferred: *transferred,
+            total: Some(total),
+            current_path: Some(current_path.to_string()),
+            completed_files: Some(completed_files),
+            total_files: Some(total_files),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_remote_path_keeps_root_paths_clean() {
+        assert_eq!(join_remote_path("/", "tmp"), "/tmp");
+        assert_eq!(join_remote_path("/var", "log"), "/var/log");
+        assert_eq!(join_remote_path("/srv/", "app"), "/srv/app");
+    }
+
+    #[tokio::test]
+    async fn build_local_directory_plan_collects_nested_files() {
+        let unique = format!(
+            "rustdock-local-plan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        fs::create_dir_all(root.join("nested"))
+            .await
+            .expect("create nested directory");
+        fs::write(root.join("root.txt"), b"root")
+            .await
+            .expect("write root file");
+        fs::write(root.join("nested").join("child.txt"), b"child")
+            .await
+            .expect("write child file");
+
+        let plan = build_local_directory_plan(root.clone(), "/remote/root".to_string())
+            .await
+            .expect("build local plan");
+
+        assert_eq!(plan.total_bytes, 9);
+        assert_eq!(
+            plan.directories,
+            vec![
+                "/remote/root".to_string(),
+                "/remote/root/nested".to_string()
+            ]
+        );
+        assert_eq!(plan.files.len(), 2);
+        let remote_paths = plan
+            .files
+            .iter()
+            .map(|file| file.remote_path.as_str())
+            .collect::<Vec<_>>();
+        assert!(remote_paths.contains(&"/remote/root/root.txt"));
+        assert!(remote_paths.contains(&"/remote/root/nested/child.txt"));
+
+        let _ = fs::remove_dir_all(root).await;
+    }
 }

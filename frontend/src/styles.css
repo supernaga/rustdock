@@ -443,6 +443,42 @@ label > span {
   margin-bottom: 16px;
 }
 
+.terminal-auth-side,
+.credential-context-card {
+  display: grid;
+  gap: 10px;
+}
+
+.credential-context-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(244, 249, 252, 0.05);
+}
+
+.credential-context-card strong,
+.credential-context-card small {
+  margin: 0;
+}
+
+.credential-context-card small {
+  color: var(--muted);
+}
+
+.context-banner,
+.workspace-context-card,
+.workspace-blocker {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(31, 43, 55, 0.76), rgba(20, 30, 39, 0.78));
+}
+
+.context-banner {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  color: var(--muted);
+}
+
 .terminal-stack {
   position: relative;
   min-height: 0;
@@ -512,10 +548,37 @@ label > span {
 
 .dock-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 14px;
   min-width: 0;
   overflow: hidden;
+}
+
+.workspace-context-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+}
+
+.workspace-context-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.workspace-context-head strong {
+  display: block;
+  font-size: 1rem;
+}
+
+.workspace-context-head .subcopy {
+  margin: 6px 0 0;
+}
+
+.workspace-context-note {
+  margin: 0;
+  color: var(--muted);
 }
 
 .dock-tabs {
@@ -532,6 +595,24 @@ label > span {
 .dock-pane {
   min-height: 0;
   overflow: hidden;
+}
+
+.workspace-blocker {
+  display: grid;
+  gap: 12px;
+  place-content: center;
+  min-height: 240px;
+  padding: 24px;
+  text-align: center;
+}
+
+.workspace-blocker h2,
+.workspace-blocker p {
+  margin: 0;
+}
+
+.workspace-blocker p {
+  color: var(--muted);
 }
 
 .editor-surface {
@@ -565,6 +646,46 @@ label > span {
   overflow: auto;
   display: grid;
   gap: 8px;
+}
+
+.sftp-list {
+  position: relative;
+}
+
+.sftp-list--drop-active {
+  border-color: rgba(255, 180, 90, 0.38);
+  background:
+    linear-gradient(180deg, rgba(31, 43, 55, 0.76), rgba(20, 30, 39, 0.78)),
+    linear-gradient(135deg, rgba(255, 180, 90, 0.08), rgba(38, 144, 255, 0.08));
+}
+
+.remote-drop-overlay {
+  position: sticky;
+  inset: 0 auto auto 0;
+  z-index: 2;
+  display: grid;
+  gap: 6px;
+  place-content: center;
+  min-height: 168px;
+  padding: 18px;
+  border: 1px dashed rgba(255, 180, 90, 0.58);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(255, 180, 90, 0.12), rgba(38, 144, 255, 0.12));
+  color: var(--ink);
+  text-align: center;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.remote-drop-overlay strong,
+.remote-drop-overlay span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.remote-drop-overlay span {
+  color: var(--muted);
 }
 
 .tree-node {
@@ -694,6 +815,42 @@ label > span {
   color: #ffc0c0;
 }
 
+.remote-context-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+}
+
+.remote-context-menu {
+  position: fixed;
+  z-index: 1000;
+  padding: 8px 0;
+  min-width: 220px;
+  border-radius: 18px;
+}
+
+.remote-context-head {
+  display: grid;
+  gap: 4px;
+  padding: 4px 14px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 6px;
+}
+
+.remote-context-head strong,
+.remote-context-head small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-context-item {
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+}
+
 .danger {
   color: var(--danger);
 }
@@ -782,5 +939,9 @@ label > span {
 
   .workspace-tabs {
     flex-wrap: wrap;
+  }
+
+  .workspace-context-head {
+    flex-direction: column;
   }
 }

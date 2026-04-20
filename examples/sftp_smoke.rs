@@ -1,7 +1,7 @@
 use rustdock_core::domain::{now_timestamp, AuthMethod, SessionProfile, SessionSyncState};
 use rustdock_core::sftp::{
-    create_remote_dir, delete_remote_path, download_remote_file, list_remote_dir, rename_remote_path,
-    upload_local_file,
+    create_remote_dir, delete_remote_path, download_remote_file, list_remote_dir,
+    rename_remote_path, upload_local_file,
 };
 use std::env;
 use std::fs;
@@ -33,8 +33,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sync_state: SessionSyncState::LocalOnly,
     };
 
-    let listing = list_remote_dir(profile.clone(), "/tmp".to_string(), Some(password.clone())).await?;
-    println!("listed {} entries from {}", listing.entries.len(), listing.directory);
+    let listing =
+        list_remote_dir(profile.clone(), "/tmp".to_string(), Some(password.clone())).await?;
+    println!(
+        "listed {} entries from {}",
+        listing.entries.len(),
+        listing.directory
+    );
 
     let marker = format!("RUSTDOCK_SFTP_{}", now_timestamp());
     let timestamp = now_timestamp();
@@ -97,13 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(password.clone()),
     )
     .await?;
-    delete_remote_path(
-        profile,
-        remote_directory.clone(),
-        true,
-        Some(password),
-    )
-    .await?;
+    delete_remote_path(profile, remote_directory.clone(), true, Some(password)).await?;
 
     let _ = fs::remove_file(&local_source);
     let _ = fs::remove_file(&local_download);
@@ -113,6 +112,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
-    env::var(name)
-        .map_err(|_| format!("missing required environment variable {name}").into())
+    env::var(name).map_err(|_| format!("missing required environment variable {name}").into())
 }

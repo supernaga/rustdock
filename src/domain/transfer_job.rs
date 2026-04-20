@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub enum TransferJobKind {
     Upload,
     Download,
+    UploadDir,
+    DownloadDir,
 }
 
 impl TransferJobKind {
@@ -12,6 +14,8 @@ impl TransferJobKind {
         match self {
             TransferJobKind::Upload => "upload",
             TransferJobKind::Download => "download",
+            TransferJobKind::UploadDir => "upload-dir",
+            TransferJobKind::DownloadDir => "download-dir",
         }
     }
 }

@@ -274,10 +274,16 @@ impl SessionRepository for SqliteSessionStore {
     fn delete_session(&self, session_id: &str) -> Result<(), String> {
         let connection = self.open_connection()?;
         connection
-            .execute("DELETE FROM transfer_events WHERE session_id = ?1", params![session_id])
+            .execute(
+                "DELETE FROM transfer_events WHERE session_id = ?1",
+                params![session_id],
+            )
             .map_err(|err| err.to_string())?;
         connection
-            .execute("DELETE FROM transfer_jobs WHERE session_id = ?1", params![session_id])
+            .execute(
+                "DELETE FROM transfer_jobs WHERE session_id = ?1",
+                params![session_id],
+            )
             .map_err(|err| err.to_string())?;
         connection
             .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
@@ -408,9 +414,6 @@ impl SessionRepository for SqliteSessionStore {
 
     fn delete_transfer_job(&self, job_id: &str) -> Result<(), String> {
         let connection = self.open_connection()?;
-        connection
-            .execute("DELETE FROM transfer_events WHERE job_id = ?1", params![job_id])
-            .map_err(|err| err.to_string())?;
         connection
             .execute("DELETE FROM transfer_jobs WHERE id = ?1", params![job_id])
             .map_err(|err| err.to_string())?;
@@ -554,7 +557,8 @@ fn serialize_json<T: Serialize>(value: &T) -> Result<String, SqlError> {
 }
 
 fn deserialize_json<T: DeserializeOwned>(value: &str) -> Result<T, SqlError> {
-    serde_json::from_str(value).map_err(|err| SqlError::FromSqlConversionFailure(0, Type::Text, Box::new(err)))
+    serde_json::from_str(value)
+        .map_err(|err| SqlError::FromSqlConversionFailure(0, Type::Text, Box::new(err)))
 }
 
 fn decode_sync_state(value: &str) -> SessionSyncState {
@@ -569,6 +573,8 @@ fn decode_sync_state(value: &str) -> SessionSyncState {
 fn decode_transfer_job_kind(value: &str) -> TransferJobKind {
     match value {
         "download" => TransferJobKind::Download,
+        "upload-dir" => TransferJobKind::UploadDir,
+        "download-dir" => TransferJobKind::DownloadDir,
         _ => TransferJobKind::Upload,
     }
 }
@@ -605,7 +611,9 @@ fn ensure_column(
         .any(|name| name == column);
 
     if !exists {
-        connection.execute(alter_sql, []).map_err(|err| err.to_string())?;
+        connection
+            .execute(alter_sql, [])
+            .map_err(|err| err.to_string())?;
     }
 
     Ok(())
@@ -614,4 +622,94 @@ fn ensure_column(
 #[allow(dead_code)]
 fn _auth_example() -> AuthMethod {
     AuthMethod::Agent
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_store(label: &str) -> SqliteSessionStore {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let database_path = std::env::temp_dir().join(format!(
+            "rustdock-{label}-{}-{unique}.sqlite3",
+            std::process::id()
+        ));
+        let store = SqliteSessionStore { database_path };
+        store.initialize_schema().expect("initialize schema");
+        store
+    }
+
+    fn sample_job(status: TransferJobStatus) -> TransferJobRecord {
+        TransferJobRecord {
+            id: "job-1".to_string(),
+            session_id: "session-1".to_string(),
+            kind: TransferJobKind::Upload,
+            local_path: "/tmp/local.txt".to_string(),
+            remote_path: "/tmp/remote.txt".to_string(),
+            status,
+            message: "original message".to_string(),
+            transferred: Some(12),
+            total: Some(48),
+            bytes: Some(48),
+            attempt_count: 1,
+            max_retries: 2,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn sample_event() -> TransferEventRecord {
+        TransferEventRecord {
+            id: "event-1".to_string(),
+            job_id: "job-1".to_string(),
+            session_id: "session-1".to_string(),
+            level: TransferEventLevel::Info,
+            message: "transfer queued".to_string(),
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn list_transfer_jobs_recovers_running_jobs_as_queued() {
+        let store = test_store("recover-running");
+        let path = store.database_path().to_path_buf();
+        store
+            .save_transfer_job(&sample_job(TransferJobStatus::Running))
+            .expect("save running job");
+
+        let jobs = store.list_transfer_jobs().expect("list jobs");
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].status, TransferJobStatus::Queued);
+        assert_eq!(jobs[0].message, "Recovered after restart");
+
+        drop(store);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn delete_transfer_job_keeps_transfer_events_history() {
+        let store = test_store("preserve-events");
+        let path = store.database_path().to_path_buf();
+        store
+            .save_transfer_job(&sample_job(TransferJobStatus::Success))
+            .expect("save job");
+        store
+            .save_transfer_event(&sample_event())
+            .expect("save event");
+
+        store.delete_transfer_job("job-1").expect("delete job");
+
+        assert!(store.list_transfer_jobs().expect("list jobs").is_empty());
+        let events = store.list_transfer_events(10).expect("list events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].job_id, "job-1");
+
+        drop(store);
+        let _ = fs::remove_file(path);
+    }
 }

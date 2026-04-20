@@ -1,25 +1,26 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use serde::{Deserialize, Serialize};
 use russh::keys::known_hosts::known_host_keys;
 use rustdock_core::domain::{
-    generate_session_id, now_timestamp, AuthMethod, SessionProfile, SessionSyncState, TransferEventRecord,
-    TransferJobRecord,
+    generate_session_id, now_timestamp, AuthMethod, SessionProfile, SessionSyncState,
+    TransferEventRecord, TransferJobRecord,
 };
 use rustdock_core::runtime::AppRuntime;
 use rustdock_core::sftp::{
-    create_remote_dir, delete_remote_path, download_remote_file, list_remote_dir, rename_remote_path,
-    upload_local_file, write_remote_text_file, read_remote_text_file, MutationResult, RemoteDirectoryListing,
-    RemoteTextFile, TransferProgress, TransferResult, download_remote_file_with_progress,
-    upload_local_file_with_progress, SftpSessionCache,
+    create_remote_dir, delete_remote_path, download_remote_directory_with_progress,
+    download_remote_file, download_remote_file_with_progress, list_remote_dir,
+    read_remote_text_file, rename_remote_path, upload_local_directory_with_progress,
+    upload_local_file, upload_local_file_with_progress, write_remote_text_file, MutationResult,
+    RemoteDirectoryListing, RemoteTextFile, TransferProgress, TransferResult,
 };
 use rustdock_core::ssh::{
     RusshSessionService, SessionController, SessionEvent, SessionService, SessionStatus,
     TerminalSize,
 };
 use rustdock_core::storage::{SessionRepository, SqliteSessionStore};
-use std::fs;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
@@ -45,7 +46,6 @@ struct AppState {
     session_service: RusshSessionService,
     controllers: Arc<Mutex<HashMap<String, SessionController>>>,
     transfer_controls: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
-    sftp_cache: SftpSessionCache,
     background_on_close: Arc<AtomicBool>,
     quitting: Arc<AtomicBool>,
 }
@@ -62,7 +62,6 @@ impl AppState {
             session_service,
             controllers: Arc::new(Mutex::new(HashMap::new())),
             transfer_controls: Arc::new(Mutex::new(HashMap::new())),
-            sftp_cache: SftpSessionCache::new(300),
             background_on_close: Arc::new(AtomicBool::new(true)),
             quitting: Arc::new(AtomicBool::new(false)),
         })
@@ -163,6 +162,8 @@ struct RemoteTextWritePayload {
 enum TransferKindPayload {
     Upload,
     Download,
+    UploadDir,
+    DownloadDir,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -178,6 +179,13 @@ struct TransferStartPayload {
 #[derive(Clone, Debug, Deserialize)]
 struct CancelTransferPayload {
     job_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LocalPathInspection {
+    path: String,
+    is_file: bool,
+    is_dir: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -199,11 +207,16 @@ enum TerminalStreamMessage {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum TransferStreamMessage {
-    Started { job_id: String },
+    Started {
+        job_id: String,
+    },
     Progress {
         job_id: String,
         transferred: u64,
         total: Option<u64>,
+        current_path: Option<String>,
+        completed_files: Option<usize>,
+        total_files: Option<usize>,
     },
     Completed {
         job_id: String,
@@ -214,7 +227,9 @@ enum TransferStreamMessage {
         job_id: String,
         error: String,
     },
-    Cancelled { job_id: String },
+    Cancelled {
+        job_id: String,
+    },
 }
 
 #[tauri::command]
@@ -237,10 +252,7 @@ fn save_transfer_job(
 }
 
 #[tauri::command]
-fn delete_transfer_job(
-    state: tauri::State<'_, AppState>,
-    job_id: String,
-) -> Result<(), String> {
+fn delete_transfer_job(state: tauri::State<'_, AppState>, job_id: String) -> Result<(), String> {
     state.store.delete_transfer_job(&job_id)
 }
 
@@ -294,7 +306,9 @@ fn save_session(
             .map(|session| session.created_at)
             .unwrap_or_else(now_timestamp),
         updated_at: now_timestamp(),
-        last_connected_at: existing.as_ref().and_then(|session| session.last_connected_at),
+        last_connected_at: existing
+            .as_ref()
+            .and_then(|session| session.last_connected_at),
         sync_state: existing
             .map(|session| session.sync_state)
             .unwrap_or(SessionSyncState::LocalOnly),
@@ -305,13 +319,11 @@ fn save_session(
 }
 
 #[tauri::command]
-fn delete_session(
-    state: tauri::State<'_, AppState>,
-    session_id: String,
-) -> Result<(), String> {
+fn delete_session(state: tauri::State<'_, AppState>, session_id: String) -> Result<(), String> {
     if let Some(controller) = remove_controller(&state, &session_id)? {
         let _ = controller.disconnect();
     }
+    cancel_transfers_for_session(&state, &session_id)?;
 
     state.store.delete_session(&session_id)?;
     delete_session_secret_internal(&session_id)
@@ -352,7 +364,8 @@ fn update_tray_status(
         return Ok(());
     };
     tray.set_title(title).map_err(|error| error.to_string())?;
-    tray.set_tooltip(tooltip).map_err(|error| error.to_string())?;
+    tray.set_tooltip(tooltip)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -401,8 +414,8 @@ fn forget_session_known_host(
         return Err("Session not found".to_string());
     };
 
-    let matches = known_host_keys(&session.host, session.port)
-        .map_err(|error| error.to_string())?;
+    let matches =
+        known_host_keys(&session.host, session.port).map_err(|error| error.to_string())?;
     if matches.is_empty() {
         return Ok(0);
     }
@@ -458,12 +471,15 @@ fn connect_terminal(
     let controllers = state.controllers.clone();
     let tracked_id = session_id.clone();
     let controller_for_pump = controller.clone();
+    let tracked_instance_id = controller.instance_id();
     std::thread::spawn(move || {
         for event in buffered_events {
             if forward_terminal_event(&channel, &controller_for_pump, event) {
-                if let Ok(mut registry) = controllers.lock() {
-                    registry.remove(&tracked_id);
-                }
+                remove_controller_if_instance_matches(
+                    &controllers,
+                    &tracked_id,
+                    tracked_instance_id,
+                );
                 return;
             }
         }
@@ -474,9 +490,7 @@ fn connect_terminal(
             }
         }
 
-        if let Ok(mut registry) = controllers.lock() {
-            registry.remove(&tracked_id);
-        }
+        remove_controller_if_instance_matches(&controllers, &tracked_id, tracked_instance_id);
     });
 
     Ok(TerminalConnectionPayload {
@@ -540,9 +554,14 @@ async fn download_sftp_file(
         return Err("Session not found".to_string());
     };
 
-    download_remote_file(session, request.remote_path, request.local_path, request.secret)
-        .await
-        .map_err(|error| error.to_string())
+    download_remote_file(
+        session,
+        request.remote_path,
+        request.local_path,
+        request.secret,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -554,9 +573,14 @@ async fn upload_sftp_file(
         return Err("Session not found".to_string());
     };
 
-    upload_local_file(session, request.local_path, request.remote_path, request.secret)
-        .await
-        .map_err(|error| error.to_string())
+    upload_local_file(
+        session,
+        request.local_path,
+        request.remote_path,
+        request.secret,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -582,9 +606,14 @@ async fn rename_sftp_path(
         return Err("Session not found".to_string());
     };
 
-    rename_remote_path(session, request.source_path, request.target_path, request.secret)
-        .await
-        .map_err(|error| error.to_string())
+    rename_remote_path(
+        session,
+        request.source_path,
+        request.target_path,
+        request.secret,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -624,9 +653,14 @@ async fn write_remote_text(
         return Err("Session not found".to_string());
     };
 
-    write_remote_text_file(session, request.remote_path, request.content, request.secret)
-        .await
-        .map_err(|error| error.to_string())
+    write_remote_text_file(
+        session,
+        request.remote_path,
+        request.content,
+        request.secret,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -674,6 +708,29 @@ async fn start_sftp_transfer(
                             job_id: job_id.clone(),
                             transferred: progress.transferred,
                             total: progress.total,
+                            current_path: progress.current_path.clone(),
+                            completed_files: progress.completed_files,
+                            total_files: progress.total_files,
+                        });
+                    },
+                )
+                .await
+            }
+            TransferKindPayload::UploadDir => {
+                upload_local_directory_with_progress(
+                    session,
+                    local_path,
+                    remote_path,
+                    secret,
+                    Some(cancel_rx),
+                    |progress: TransferProgress| {
+                        let _ = channel.send(TransferStreamMessage::Progress {
+                            job_id: job_id.clone(),
+                            transferred: progress.transferred,
+                            total: progress.total,
+                            current_path: progress.current_path.clone(),
+                            completed_files: progress.completed_files,
+                            total_files: progress.total_files,
                         });
                     },
                 )
@@ -691,6 +748,29 @@ async fn start_sftp_transfer(
                             job_id: job_id.clone(),
                             transferred: progress.transferred,
                             total: progress.total,
+                            current_path: progress.current_path.clone(),
+                            completed_files: progress.completed_files,
+                            total_files: progress.total_files,
+                        });
+                    },
+                )
+                .await
+            }
+            TransferKindPayload::DownloadDir => {
+                download_remote_directory_with_progress(
+                    session,
+                    remote_path,
+                    local_path,
+                    secret,
+                    Some(cancel_rx),
+                    |progress: TransferProgress| {
+                        let _ = channel.send(TransferStreamMessage::Progress {
+                            job_id: job_id.clone(),
+                            transferred: progress.transferred,
+                            total: progress.total,
+                            current_path: progress.current_path.clone(),
+                            completed_files: progress.completed_files,
+                            total_files: progress.total_files,
                         });
                     },
                 )
@@ -744,6 +824,16 @@ fn cancel_sftp_transfer(
     cancel
         .send(true)
         .map_err(|_| "Failed to cancel transfer".to_string())
+}
+
+#[tauri::command]
+fn inspect_local_path(path: String) -> Result<LocalPathInspection, String> {
+    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+    Ok(LocalPathInspection {
+        path,
+        is_file: metadata.is_file(),
+        is_dir: metadata.is_dir(),
+    })
 }
 
 fn validate_session_draft(draft: &SessionDraftPayload) -> Result<(), String> {
@@ -820,6 +910,52 @@ fn remove_controller(
     Ok(controllers.remove(session_id))
 }
 
+fn remove_controller_if_instance_matches(
+    controllers: &Arc<Mutex<HashMap<String, SessionController>>>,
+    session_id: &str,
+    instance_id: u64,
+) {
+    if let Ok(mut registry) = controllers.lock() {
+        let should_remove = registry
+            .get(session_id)
+            .map(|controller| controller.instance_id() == instance_id)
+            .unwrap_or(false);
+        if should_remove {
+            registry.remove(session_id);
+        }
+    }
+}
+
+fn cancel_transfers_for_session(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+) -> Result<(), String> {
+    let job_ids: Vec<String> = state
+        .store
+        .list_transfer_jobs()?
+        .into_iter()
+        .filter(|job| job.session_id == session_id)
+        .map(|job| job.id)
+        .collect();
+
+    if job_ids.is_empty() {
+        return Ok(());
+    }
+
+    let controls = state
+        .transfer_controls
+        .lock()
+        .map_err(|_| "transfer registry is poisoned".to_string())?;
+
+    for job_id in job_ids {
+        if let Some(cancel) = controls.get(&job_id) {
+            let _ = cancel.send(true);
+        }
+    }
+
+    Ok(())
+}
+
 fn wait_for_terminal_ready(
     events: &std::sync::mpsc::Receiver<SessionEvent>,
 ) -> Result<Vec<SessionEvent>, String> {
@@ -829,12 +965,16 @@ fn wait_for_terminal_ready(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("Timed out while establishing SSH session".to_string());
+            return Err(extract_terminal_startup_error_with_fallback(
+                &buffered,
+                Some("Timed out while establishing SSH session"),
+            ));
         }
 
         match events.recv_timeout(remaining) {
             Ok(event) => {
-                let is_connected = matches!(event, SessionEvent::StatusChanged(SessionStatus::Connected));
+                let is_connected =
+                    matches!(event, SessionEvent::StatusChanged(SessionStatus::Connected));
                 let is_closed = matches!(event, SessionEvent::Closed);
                 buffered.push(event);
 
@@ -847,16 +987,28 @@ fn wait_for_terminal_ready(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                return Err("Timed out while establishing SSH session".to_string());
+                return Err(extract_terminal_startup_error_with_fallback(
+                    &buffered,
+                    Some("Timed out while establishing SSH session"),
+                ));
             }
             Err(RecvTimeoutError::Disconnected) => {
-                return Err(extract_terminal_startup_error(&buffered));
+                return Err(extract_terminal_startup_error_with_fallback(
+                    &buffered, None,
+                ));
             }
         }
     }
 }
 
 fn extract_terminal_startup_error(events: &[SessionEvent]) -> String {
+    extract_terminal_startup_error_with_fallback(events, None)
+}
+
+fn extract_terminal_startup_error_with_fallback(
+    events: &[SessionEvent],
+    fallback: Option<&str>,
+) -> String {
     let output_lines: Vec<&str> = events
         .iter()
         .filter_map(|event| match event {
@@ -869,6 +1021,28 @@ fn extract_terminal_startup_error(events: &[SessionEvent]) -> String {
         .collect();
 
     for line in output_lines.iter().rev() {
+        if let Some(message) = line.strip_prefix("[known_hosts]") {
+            let message = message.trim();
+            if !message.is_empty()
+                && (message.contains("rejected")
+                    || message.contains("failed")
+                    || message.contains("mismatch"))
+            {
+                return message.to_string();
+            }
+        }
+    }
+
+    for line in output_lines.iter().rev() {
+        if let Some(message) = line.strip_prefix("[disconnect]") {
+            let message = message.trim();
+            if !message.is_empty() {
+                return message.to_string();
+            }
+        }
+    }
+
+    for line in output_lines.iter().rev() {
         if let Some(message) = line.strip_prefix("[error]") {
             let message = message.trim();
             if !message.is_empty() {
@@ -879,6 +1053,10 @@ fn extract_terminal_startup_error(events: &[SessionEvent]) -> String {
 
     if let Some(line) = output_lines.last() {
         return (*line).to_string();
+    }
+
+    if let Some(fallback) = fallback {
+        return fallback.to_string();
     }
 
     if events
@@ -923,7 +1101,8 @@ fn main() {
             }
 
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if !quitting.load(Ordering::Relaxed) && background_on_close.load(Ordering::Relaxed) {
+                if !quitting.load(Ordering::Relaxed) && background_on_close.load(Ordering::Relaxed)
+                {
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -961,7 +1140,8 @@ fn main() {
             read_remote_text,
             write_remote_text,
             start_sftp_transfer,
-            cancel_sftp_transfer
+            cancel_sftp_transfer,
+            inspect_local_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -988,7 +1168,9 @@ fn save_session_secret_internal(session_id: &str, secret: &str) -> Result<(), St
         return Err("Secret cannot be empty".to_string());
     }
     let entry = keyring_entry(session_id)?;
-    entry.set_password(secret).map_err(|error| error.to_string())
+    entry
+        .set_password(secret)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -1047,7 +1229,8 @@ fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()>
 }
 
 fn known_hosts_path() -> Result<PathBuf, String> {
-    let home_dir = user_home_dir().ok_or_else(|| "Unable to determine user home directory".to_string())?;
+    let home_dir =
+        user_home_dir().ok_or_else(|| "Unable to determine user home directory".to_string())?;
     Ok(home_dir.join(".ssh").join("known_hosts"))
 }
 
@@ -1101,4 +1284,88 @@ fn remove_known_host_lines(lines: &[usize]) -> Result<(), String> {
         rewritten.push('\n');
     }
     fs::write(path, rewritten).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustdock_core::domain::{AuthMethod, SessionProfile, SessionSyncState};
+    use rustdock_core::runtime::AppRuntime;
+    use rustdock_core::ssh::{MockSessionService, SessionService};
+
+    fn sample_session(id: &str) -> SessionProfile {
+        SessionProfile {
+            id: id.to_string(),
+            name: "Test Session".to_string(),
+            host: "example.com".to_string(),
+            port: 22,
+            username: "root".to_string(),
+            auth_method: AuthMethod::Password,
+            tags: Vec::new(),
+            notes: String::new(),
+            local_roots: Vec::new(),
+            remote_roots: vec!["/".to_string()],
+            created_at: 1,
+            updated_at: 1,
+            last_connected_at: None,
+            sync_state: SessionSyncState::LocalOnly,
+        }
+    }
+
+    #[test]
+    fn startup_error_prefers_known_hosts_rejection_over_timeout_fallback() {
+        let events = vec![
+            SessionEvent::Output(
+                "[known_hosts] rejected host key for example.com:22: key mismatch".to_string(),
+            ),
+            SessionEvent::StatusChanged(SessionStatus::Failed),
+            SessionEvent::Closed,
+        ];
+
+        let message = extract_terminal_startup_error_with_fallback(
+            &events,
+            Some("Timed out while establishing SSH session"),
+        );
+
+        assert_eq!(
+            message,
+            "rejected host key for example.com:22: key mismatch"
+        );
+    }
+
+    #[test]
+    fn removing_old_controller_instance_keeps_newer_controller_registered() {
+        let runtime = AppRuntime::new().expect("runtime");
+        let service = MockSessionService::new(runtime.handle());
+        let profile = sample_session("session-1");
+
+        let old = service
+            .connect(&profile, TerminalSize::default(), None)
+            .expect("old controller")
+            .controller();
+        let new = service
+            .connect(&profile, TerminalSize::default(), None)
+            .expect("new controller")
+            .controller();
+
+        let registry = Arc::new(Mutex::new(HashMap::from([(
+            profile.id.clone(),
+            new.clone(),
+        )])));
+
+        remove_controller_if_instance_matches(&registry, &profile.id, old.instance_id());
+        let stored = registry
+            .lock()
+            .expect("registry")
+            .get(&profile.id)
+            .cloned()
+            .expect("new controller should remain");
+        assert_eq!(stored.instance_id(), new.instance_id());
+
+        remove_controller_if_instance_matches(&registry, &profile.id, new.instance_id());
+        assert!(registry.lock().expect("registry").is_empty());
+
+        let _ = old.disconnect();
+        let _ = new.disconnect();
+    }
 }

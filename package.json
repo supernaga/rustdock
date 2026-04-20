@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "typecheck": "vue-tsc --noEmit",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
   },
@@ -15,13 +16,14 @@
     "@tauri-apps/plugin-notification": "^2.0.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
-    "vue": "^3.5.13",
-    "@xterm/xterm": "^5.5.0"
+    "@xterm/xterm": "^5.5.0",
+    "vue": "^3.5.13"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
     "@vitejs/plugin-vue": "^5.2.1",
     "typescript": "^5.7.2",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vue-tsc": "^3.2.6"
   }
 }

@@ -5,8 +5,9 @@ use russh::keys::agent::client::AgentClient;
 use russh::keys::{self, HashAlg, PrivateKeyWithHashAlg, PublicKey};
 use russh::ChannelMsg;
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::runtime::Handle as RuntimeHandle;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -20,7 +21,10 @@ pub struct TerminalSize {
 
 impl Default for TerminalSize {
     fn default() -> Self {
-        Self { cols: 120, rows: 32 }
+        Self {
+            cols: 120,
+            rows: 32,
+        }
     }
 }
 
@@ -58,14 +62,21 @@ enum SessionCommand {
     Disconnect,
 }
 
+static NEXT_CONTROLLER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Clone)]
 pub struct SessionController {
+    instance_id: u64,
     session_id: String,
     session_name: String,
     commands: tokio_mpsc::UnboundedSender<SessionCommand>,
 }
 
 impl SessionController {
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -249,6 +260,7 @@ impl SessionService for MockSessionService {
         });
 
         let controller = SessionController {
+            instance_id: next_controller_instance_id(),
             session_id,
             session_name,
             commands: command_tx,
@@ -263,6 +275,10 @@ impl SessionService for MockSessionService {
 
 fn send_output(sender: &mpsc::Sender<SessionEvent>, text: String) -> Result<(), ()> {
     sender.send(SessionEvent::Output(text)).map_err(|_| ())
+}
+
+fn next_controller_instance_id() -> u64 {
+    NEXT_CONTROLLER_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Clone)]
@@ -287,6 +303,7 @@ impl SessionService for RusshSessionService {
         let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
 
         let controller = SessionController {
+            instance_id: next_controller_instance_id(),
             session_id: profile.id.clone(),
             session_name: profile.name.clone(),
             commands: command_tx,
@@ -295,7 +312,10 @@ impl SessionService for RusshSessionService {
         let profile = profile.clone();
         let runtime = self.handle.clone();
         self.handle.spawn(async move {
-            if let Err(error) = run_russh_session(runtime, profile, size, secret, event_tx.clone(), command_rx).await {
+            if let Err(error) =
+                run_russh_session(runtime, profile, size, secret, event_tx.clone(), command_rx)
+                    .await
+            {
                 let _ = event_tx.send(SessionEvent::StatusChanged(SessionStatus::Failed));
                 let _ = send_output(&event_tx, format!("[error] {error:#}\r\n"));
                 let _ = event_tx.send(SessionEvent::Closed);
@@ -477,7 +497,9 @@ async fn authenticate(
                 Err(anyhow!("server rejected public key authentication"))
             }
         }
-        crate::domain::AuthMethod::Agent => authenticate_with_agent(session, &profile.username).await,
+        crate::domain::AuthMethod::Agent => {
+            authenticate_with_agent(session, &profile.username).await
+        }
     }
 }
 
@@ -506,7 +528,9 @@ async fn authenticate_with_agent(
 
     #[cfg(not(any(unix, windows)))]
     {
-        return Err(anyhow!("SSH agent authentication is not supported on this platform"));
+        return Err(anyhow!(
+            "SSH agent authentication is not supported on this platform"
+        ));
     }
 
     let identities = agent
@@ -576,7 +600,11 @@ impl TrustOnFirstUseHandler {
         port: u16,
         event_tx: Option<mpsc::Sender<SessionEvent>>,
     ) -> Self {
-        Self { host, port, event_tx }
+        Self {
+            host,
+            port,
+            event_tx,
+        }
     }
 }
 
@@ -611,10 +639,7 @@ impl client::Handler for TrustOnFirstUseHandler {
         }
     }
 
-    async fn disconnected(
-        &mut self,
-        reason: client::DisconnectReason<Self::Error>,
-    ) -> Result<()> {
+    async fn disconnected(&mut self, reason: client::DisconnectReason<Self::Error>) -> Result<()> {
         emit_optional(&self.event_tx, format!("[disconnect] {:?}\r\n", reason));
         Ok(())
     }

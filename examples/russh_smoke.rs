@@ -84,6 +84,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
-    env::var(name)
-        .map_err(|_| format!("missing required environment variable {name}").into())
+    env::var(name).map_err(|_| format!("missing required environment variable {name}").into())
 }
