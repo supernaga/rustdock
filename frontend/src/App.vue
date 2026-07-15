@@ -3027,36 +3027,32 @@ onBeforeUnmount(() => {
     <main class="workspace-shell">
       <header class="topbar">
         <div class="workspace-tabs">
-          <button class="workspace-tab active">工作台</button>
           <button
             v-for="tab in orderedTerminalTabs"
             :key="tab.sessionId"
             class="workspace-tab"
             :class="{
-              connected: tab.sessionId === activeTerminalId,
+              active: tab.sessionId === activeTerminalId,
+              connected: tab.status === 'Connected' || tab.status === 'Connecting',
               disconnected: tab.status === 'Disconnected' || tab.status === 'Failed'
             }"
             @click="activateTerminalTab(tab.sessionId)"
           >
             <span>{{ tab.sessionName }}</span>
             <small v-if="tab.unread">{{ tab.unread }}</small>
-            <span class="workspace-tab-status">{{ terminalStatusLabel(tab.status) }}</span>
             <span class="workspace-tab-close" @click.stop="closeTerminalTab(tab.sessionId)">×</span>
           </button>
-          <span class="workspace-caption">
-            左侧草稿：{{ selectedSessionSummary }}
-            <template v-if="workspaceMismatch"> · 右侧工作区：{{ activeWorkspaceSummary }}</template>
-          </span>
+          <span v-if="!orderedTerminalTabs.length" class="workspace-caption">终端标签会在连接后出现</span>
         </div>
 
         <div class="actions toolbar-actions">
-          <button class="ghost" :disabled="busy || !selectedSessionId" @click="connectTerminal">连接</button>
-          <button class="ghost danger" :disabled="!activeTerminalId" @click="disconnectTerminal">断开</button>
-          <button class="ghost" :disabled="!activeWorkspaceSession" @click="openDockTab('browser')">文件</button>
-          <button class="ghost" :disabled="!activeWorkspaceSession" @click="openDockTab('editor')">编辑器</button>
-          <button class="ghost" @click="openDockTab('queue')">队列</button>
-          <button class="ghost" @click="openDockTab('activity')">活动</button>
-          <button class="ghost" @click="openDockTab('hosts')">主机</button>
+          <button class="ghost tight" :disabled="busy || !selectedSessionId" @click="connectTerminal">连接</button>
+          <button class="ghost tight danger" :disabled="!activeTerminalId" @click="disconnectTerminal">断开</button>
+          <button class="ghost tight" :disabled="!activeWorkspaceSession" @click="openDockTab('browser')">文件</button>
+          <button class="ghost tight" :disabled="!activeWorkspaceSession" @click="openDockTab('editor')">编辑</button>
+          <button class="ghost tight" @click="openDockTab('queue')">队列</button>
+          <button class="ghost tight" @click="openDockTab('activity')">活动</button>
+          <button class="ghost tight" @click="openDockTab('hosts')">主机</button>
         </div>
       </header>
 
@@ -3174,10 +3170,9 @@ onBeforeUnmount(() => {
       </section>
 
       <footer class="status-bar">
-        <span>{{ statusLine }}</span>
-        <span>{{ selectedSession ? `左侧草稿：${selectedSession.name}` : '左侧还没有选中会话' }}</span>
-        <span>{{ activeWorkspaceSession ? `右侧工作区：${activeWorkspaceSession.name}` : '右侧工作区未连接' }}</span>
-        <span>{{ runningTransferCount }} 个执行中 · {{ queuedTransferCount }} 个排队中 · {{ failedTransferCount }} 个失败</span>
+        <span class="status-main">{{ statusLine }}</span>
+        <span v-if="activeWorkspaceSession">{{ activeWorkspaceSession.name }}</span>
+        <span>{{ runningTransferCount }} 传输 / {{ queuedTransferCount }} 排队 / {{ failedTransferCount }} 失败</span>
       </footer>
     </main>
 
