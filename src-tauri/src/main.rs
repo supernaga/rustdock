@@ -11,7 +11,7 @@ use rustdock_core::sftp::{
     download_remote_file, download_remote_file_with_progress, list_remote_dir,
     read_remote_text_file, rename_remote_path, upload_local_directory_with_progress,
     upload_local_file, upload_local_file_with_progress, write_remote_text_file, MutationResult,
-    RemoteDirectoryListing, RemoteTextFile, TransferProgress, TransferResult,
+    RemoteDirectoryListing, RemoteTextFile, SftpPool, TransferProgress, TransferResult,
 };
 use rustdock_core::ssh::{
     RusshSessionService, SessionController, SessionEvent, SessionService, SessionStatus,
@@ -44,6 +44,7 @@ struct AppState {
     store: SqliteSessionStore,
     _runtime: Arc<AppRuntime>,
     session_service: RusshSessionService,
+    sftp_pool: SftpPool,
     controllers: Arc<Mutex<HashMap<String, SessionController>>>,
     transfer_controls: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     background_on_close: Arc<AtomicBool>,
@@ -60,6 +61,7 @@ impl AppState {
             store,
             _runtime: runtime,
             session_service,
+            sftp_pool: SftpPool::new(),
             controllers: Arc::new(Mutex::new(HashMap::new())),
             transfer_controls: Arc::new(Mutex::new(HashMap::new())),
             background_on_close: Arc::new(AtomicBool::new(true)),
@@ -324,6 +326,7 @@ fn delete_session(state: tauri::State<'_, AppState>, session_id: String) -> Resu
         let _ = controller.disconnect();
     }
     cancel_transfers_for_session(&state, &session_id)?;
+    invalidate_sftp_pool(&state, &session_id);
 
     state.store.delete_session(&session_id)?;
     delete_session_secret_internal(&session_id)
@@ -528,6 +531,9 @@ fn disconnect_terminal(
     if let Some(controller) = remove_controller(&state, &session_id)? {
         controller.disconnect()?;
     }
+    // Terminal and SFTP share the same logical session identity; drop the
+    // cached SFTP channel so the next browse re-authenticates cleanly.
+    invalidate_sftp_pool(&state, &session_id);
     Ok(())
 }
 
@@ -540,7 +546,7 @@ async fn list_sftp_dir(
         return Err("Session not found".to_string());
     };
 
-    list_remote_dir(session, request.path, request.secret)
+    list_remote_dir(Some(&state.sftp_pool), session, request.path, request.secret)
         .await
         .map_err(|error| error.to_string())
 }
@@ -555,6 +561,7 @@ async fn download_sftp_file(
     };
 
     download_remote_file(
+        Some(&state.sftp_pool),
         session,
         request.remote_path,
         request.local_path,
@@ -574,6 +581,7 @@ async fn upload_sftp_file(
     };
 
     upload_local_file(
+        Some(&state.sftp_pool),
         session,
         request.local_path,
         request.remote_path,
@@ -592,7 +600,7 @@ async fn create_sftp_dir(
         return Err("Session not found".to_string());
     };
 
-    create_remote_dir(session, request.remote_path, request.secret)
+    create_remote_dir(Some(&state.sftp_pool), session, request.remote_path, request.secret)
         .await
         .map_err(|error| error.to_string())
 }
@@ -607,6 +615,7 @@ async fn rename_sftp_path(
     };
 
     rename_remote_path(
+        Some(&state.sftp_pool),
         session,
         request.source_path,
         request.target_path,
@@ -625,7 +634,13 @@ async fn delete_sftp_path(
         return Err("Session not found".to_string());
     };
 
-    delete_remote_path(session, request.remote_path, request.is_dir, request.secret)
+    delete_remote_path(
+        Some(&state.sftp_pool),
+        session,
+        request.remote_path,
+        request.is_dir,
+        request.secret,
+    )
         .await
         .map_err(|error| error.to_string())
 }
@@ -639,7 +654,7 @@ async fn read_remote_text(
         return Err("Session not found".to_string());
     };
 
-    read_remote_text_file(session, request.remote_path, request.secret)
+    read_remote_text_file(Some(&state.sftp_pool), session, request.remote_path, request.secret)
         .await
         .map_err(|error| error.to_string())
 }
@@ -654,6 +669,7 @@ async fn write_remote_text(
     };
 
     write_remote_text_file(
+        Some(&state.sftp_pool),
         session,
         request.remote_path,
         request.content,
@@ -689,6 +705,7 @@ async fn start_sftp_transfer(
     let local_path = request.local_path.clone();
     let remote_path = request.remote_path.clone();
     let runtime = state._runtime.clone();
+    let sftp_pool = state.sftp_pool.clone();
 
     runtime.handle().spawn(async move {
         let _ = channel.send(TransferStreamMessage::Started {
@@ -698,6 +715,7 @@ async fn start_sftp_transfer(
         let result = match kind {
             TransferKindPayload::Upload => {
                 upload_local_file_with_progress(
+                    Some(&sftp_pool),
                     session,
                     local_path,
                     remote_path,
@@ -718,6 +736,7 @@ async fn start_sftp_transfer(
             }
             TransferKindPayload::UploadDir => {
                 upload_local_directory_with_progress(
+                    Some(&sftp_pool),
                     session,
                     local_path,
                     remote_path,
@@ -738,6 +757,7 @@ async fn start_sftp_transfer(
             }
             TransferKindPayload::Download => {
                 download_remote_file_with_progress(
+                    Some(&sftp_pool),
                     session,
                     remote_path,
                     local_path,
@@ -758,6 +778,7 @@ async fn start_sftp_transfer(
             }
             TransferKindPayload::DownloadDir => {
                 download_remote_directory_with_progress(
+                    Some(&sftp_pool),
                     session,
                     remote_path,
                     local_path,
@@ -954,6 +975,17 @@ fn cancel_transfers_for_session(
     }
 
     Ok(())
+}
+
+
+fn invalidate_sftp_pool(state: &tauri::State<'_, AppState>, session_id: &str) {
+    let pool = state.sftp_pool.clone();
+    let session_id = session_id.to_string();
+    // block_on is safe here: AppRuntime is a dedicated multi-thread runtime, and
+    // these commands run on Tauri's thread (not on that runtime's workers).
+    state._runtime.handle().block_on(async move {
+        pool.invalidate(&session_id).await;
+    });
 }
 
 fn wait_for_terminal_ready(

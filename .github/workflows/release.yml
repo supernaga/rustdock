@@ -1,0 +1,161 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (e.g. v0.1.1). Leave empty to only build draft assets without tagging."
+        required: false
+        default: ""
+      draft:
+        description: "Create as draft release"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: rustdock-linux
+          - os: windows-latest
+            artifact_name: rustdock-windows
+          - os: macos-latest
+            artifact_name: rustdock-macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build desktop app
+        run: npx tauri build
+
+      - name: Collect release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          if [ -d src-tauri/target/release/bundle ]; then
+            find src-tauri/target/release/bundle -type f \
+              \( -name '*.msi' -o -name '*.exe' -o -name '*.nsis.zip' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.dmg' -o -name '*.app.tar.gz' \) \
+              -print0 | while IFS= read -r -d '' file; do
+                cp -f "$file" "dist-release/$(basename "$file")"
+              done
+          fi
+          # Fallback: copy entire bundle tree if no known installer patterns matched
+          if [ -z "$(ls -A dist-release 2>/dev/null || true)" ]; then
+            cp -R src-tauri/target/release/bundle/* dist-release/ 2>/dev/null || true
+          fi
+          echo "Collected files:"
+          find dist-release -type f | sort
+
+      - name: Upload platform artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist-release/**
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || inputs.tag != ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "No tag provided; skip publish"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.draft }}" = "true" ]; then
+            echo "draft=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "draft=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all build artifacts
+        if: steps.meta.outputs.skip != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Flatten assets
+        if: steps.meta.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p upload
+          find release-assets -type f -print0 | while IFS= read -r -d '' file; do
+            base="$(basename "$file")"
+            # Avoid collisions by prefixing with platform folder name when needed
+            dest="upload/$base"
+            if [ -e "$dest" ]; then
+              parent="$(basename "$(dirname "$file")")"
+              dest="upload/${parent}-$base"
+            fi
+            cp -f "$file" "$dest"
+          done
+          echo "Upload candidates:"
+          ls -la upload
+
+      - name: Create GitHub Release
+        if: steps.meta.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: RustDock ${{ steps.meta.outputs.tag }}
+          draft: ${{ steps.meta.outputs.draft == 'true' }}
+          generate_release_notes: true
+          files: upload/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

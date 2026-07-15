@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let listing =
-        list_remote_dir(profile.clone(), "/tmp".to_string(), Some(password.clone())).await?;
+        list_remote_dir(None, profile.clone(), "/tmp".to_string(), Some(password.clone())).await?;
     println!(
         "listed {} entries from {}",
         listing.entries.len(),
@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&local_source, &marker)?;
 
     create_remote_dir(
+        None,
         profile.clone(),
         remote_directory.clone(),
         Some(password.clone()),
@@ -60,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("created directory {}", remote_directory);
 
     let upload = upload_local_file(
+        None,
         profile.clone(),
         local_source.clone(),
         remote_target.clone(),
@@ -69,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("uploaded {} bytes to {}", upload.bytes, upload.path);
 
     let renamed = rename_remote_path(
+        None,
         profile.clone(),
         remote_target.clone(),
         remote_renamed.clone(),
@@ -78,6 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("renamed remote file to {}", renamed.path);
 
     let download = download_remote_file(
+        None,
         profile.clone(),
         remote_renamed.clone(),
         local_download.clone(),
@@ -96,13 +100,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     delete_remote_path(
+        None,
         profile.clone(),
         remote_renamed.clone(),
         false,
         Some(password.clone()),
     )
     .await?;
-    delete_remote_path(profile, remote_directory.clone(), true, Some(password)).await?;
+    delete_remote_path(None, profile, remote_directory.clone(), true, Some(password)).await?;
 
     let _ = fs::remove_file(&local_source);
     let _ = fs::remove_file(&local_download);

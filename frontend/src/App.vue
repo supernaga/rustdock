@@ -826,24 +826,29 @@ async function activateTerminalTab(sessionId: string) {
   syncTerminalViewport()
 }
 
-function registerTerminalTab(connection: TerminalConnection): TerminalTab {
-  const existing = findTerminalTab(connection.session_id)
+function ensureTerminalTab(sessionId: string, sessionName: string): TerminalTab {
+  const existing = findTerminalTab(sessionId)
   if (existing) {
-    existing.sessionName = connection.session_name
-    existing.connectedAt = Date.now()
-    existing.unread = 0
+    existing.sessionName = sessionName
     return existing
   }
 
   const tab: TerminalTab = {
-    sessionId: connection.session_id,
-    sessionName: connection.session_name,
+    sessionId,
+    sessionName,
     status: 'Connecting',
     buffer: '',
     unread: 0,
     connectedAt: Date.now()
   }
   terminalTabs.value = [tab, ...terminalTabs.value]
+  return tab
+}
+
+function registerTerminalTab(connection: TerminalConnection): TerminalTab {
+  const tab = ensureTerminalTab(connection.session_id, connection.session_name)
+  tab.connectedAt = Date.now()
+  tab.unread = 0
   return tab
 }
 
@@ -995,6 +1000,22 @@ async function connectTerminal() {
     ? `正在连接 ${fallbackSessionName}...`
     : `正在连接 ${fallbackSessionName}，当前终端保持为 ${activeTerminalName.value || '现有工作区'}。`
 
+  // Register the tab before invoke so early Channel messages (Connected / banner
+  // output) are not dropped while the backend is still waiting on readiness.
+  const pendingTab = ensureTerminalTab(sessionId, fallbackSessionName)
+  if (pendingTab.status === 'Idle' || pendingTab.status === 'Disconnected' || pendingTab.status === 'Failed') {
+    pendingTab.status = 'Connecting'
+  }
+  if (pendingTab.buffer.length === 0) {
+    pendingTab.buffer = trimTerminalBuffer(
+      `\x1b[1;34m[workspace]\x1b[0m Opening ${fallbackSessionName}\r\n`
+    )
+  }
+  if (updatesVisibleTerminal) {
+    terminalStatus.value = pendingTab.status
+    syncTerminalViewport()
+  }
+
   try {
     if (rememberSecret.value && connectSecret.value.trim()) {
       await invoke('save_session_secret', {
@@ -1023,11 +1044,11 @@ async function connectTerminal() {
       channel
     })
 
-    const tab = registerTerminalTab(connection)
-    tab.status = 'Connecting'
-    if (tab.buffer.length === 0) {
-      tab.buffer = trimTerminalBuffer(`\x1b[1;34m[workspace]\x1b[0m Opening ${fallbackSessionName}\r\n`)
-    }
+    // Refresh name only — never force status back to Connecting (Channel may
+    // already have delivered Connected before invoke resolved).
+    const tab = ensureTerminalTab(connection.session_id, connection.session_name)
+    tab.connectedAt = Date.now()
+    tab.unread = 0
     await activateTerminalTab(connection.session_id)
     activeDockTab.value = 'browser'
     const sftpLoaded = await loadSftpDirectory(selectedSessionRemoteRoot.value)
@@ -1037,7 +1058,10 @@ async function connectTerminal() {
     await loadKnownHosts()
     statusLine.value = sftpLoaded ? `终端已连接到 ${connection.session_name}。` : sftpStatus
   } catch (error) {
-    if (updatesVisibleTerminal) {
+    const tab = findTerminalTab(sessionId)
+    if (tab && (tab.status === 'Connecting' || tab.status === 'Failed' || tab.status === 'Idle')) {
+      await removeTerminalTab(sessionId, { activateFallback: updatesVisibleTerminal })
+    } else if (updatesVisibleTerminal) {
       terminalStatus.value = 'Failed'
     }
     statusLine.value = renderError(error)

@@ -1,12 +1,15 @@
-use crate::domain::SessionProfile;
+use crate::domain::{AuthMethod, SessionProfile};
 use crate::ssh::{connect_authenticated, TrustOnFirstUseHandler};
 use anyhow::{anyhow, Context, Result};
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs::{self, File as TokioFile};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
+use tokio::task::JoinHandle;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RemoteDirEntry {
@@ -52,6 +55,165 @@ pub struct TransferProgress {
 
 const MAX_TEXT_FILE_BYTES: u64 = 1024 * 1024;
 
+/// Fingerprint of the remote endpoint + auth material used to open an SFTP session.
+/// Cached connections are reused only when this matches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConnectionKey {
+    session_id: String,
+    host: String,
+    port: u16,
+    username: String,
+    auth_kind: String,
+    private_key_path: Option<String>,
+    /// Present only for password / key-passphrase auth so a secret change forces reconnect.
+    secret_token: Option<String>,
+}
+
+impl ConnectionKey {
+    fn from_profile(profile: &SessionProfile, secret: Option<&str>) -> Self {
+        let (auth_kind, private_key_path) = match &profile.auth_method {
+            AuthMethod::Password => ("password".to_string(), None),
+            AuthMethod::PrivateKey { path } => ("private-key".to_string(), Some(path.clone())),
+            AuthMethod::Agent => ("agent".to_string(), None),
+        };
+
+        // Agent never embeds a secret. Password always keys on secret. Private key
+        // only keys on secret when one was provided (optional passphrase).
+        let secret_token = match &profile.auth_method {
+            AuthMethod::Password => secret.map(str::to_string),
+            AuthMethod::PrivateKey { .. } => secret.map(str::to_string),
+            AuthMethod::Agent => None,
+        };
+
+        Self {
+            session_id: profile.id.clone(),
+            host: profile.host.clone(),
+            port: profile.port,
+            username: profile.username.clone(),
+            auth_kind,
+            private_key_path,
+            secret_token,
+        }
+    }
+}
+
+struct PooledSftp {
+    key: ConnectionKey,
+    sftp: Arc<Mutex<SftpSession>>,
+    _driver: JoinHandle<()>,
+}
+
+/// Per-session SFTP connection pool. Reuses one authenticated SSH+SFTP channel
+/// per session id so listing/transfers do not re-auth on every call.
+#[derive(Clone, Default)]
+pub struct SftpPool {
+    inner: Arc<Mutex<HashMap<String, PooledSftp>>>,
+}
+
+impl SftpPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drop the cached connection for a session (e.g. after disconnect/delete).
+    pub async fn invalidate(&self, session_id: &str) {
+        let mut guard = self.inner.lock().await;
+        guard.remove(session_id);
+    }
+
+    /// Drop every cached connection.
+    pub async fn clear(&self) {
+        let mut guard = self.inner.lock().await;
+        guard.clear();
+    }
+
+    async fn acquire(
+        &self,
+        profile: &SessionProfile,
+        secret: Option<&str>,
+    ) -> Result<Arc<Mutex<SftpSession>>> {
+        let key = ConnectionKey::from_profile(profile, secret);
+        {
+            let guard = self.inner.lock().await;
+            if let Some(pooled) = guard.get(&profile.id) {
+                if pooled.key == key {
+                    return Ok(pooled.sftp.clone());
+                }
+            }
+        }
+
+        // Open outside the map lock so concurrent sessions can connect in parallel.
+        let (sftp, driver) = open_sftp_raw(profile.clone(), secret).await?;
+        let sftp = Arc::new(Mutex::new(sftp));
+
+        let mut guard = self.inner.lock().await;
+        // Another task may have won the race; prefer the existing live entry if key matches.
+        if let Some(pooled) = guard.get(&profile.id) {
+            if pooled.key == key {
+                return Ok(pooled.sftp.clone());
+            }
+        }
+        guard.insert(
+            profile.id.clone(),
+            PooledSftp {
+                key,
+                sftp: sftp.clone(),
+                _driver: driver,
+            },
+        );
+        Ok(sftp)
+    }
+
+    async fn with_sftp<T, F, Fut>(
+        &self,
+        profile: SessionProfile,
+        secret: Option<&str>,
+        operation: F,
+    ) -> Result<T>
+    where
+        F: Fn(Arc<Mutex<SftpSession>>) -> Fut + Clone,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let sftp = self.acquire(&profile, secret).await?;
+        match operation.clone()(sftp).await {
+            Ok(value) => Ok(value),
+            Err(first_error) => {
+                // Connection may have died mid-flight; drop cache and retry once.
+                self.invalidate(&profile.id).await;
+                let sftp = self.acquire(&profile, secret).await.map_err(|retry_error| {
+                    anyhow!("{first_error:#}; reconnect also failed: {retry_error:#}")
+                })?;
+                operation(sftp).await.map_err(|retry_error| {
+                    anyhow!("{first_error:#}; retry failed: {retry_error:#}")
+                })
+            }
+        }
+    }
+}
+
+async fn run_with_sftp_pool<T, F, Fut>(
+    pool: Option<&SftpPool>,
+    profile: SessionProfile,
+    secret: Option<String>,
+    operation: F,
+) -> Result<T>
+where
+    F: Fn(Arc<Mutex<SftpSession>>) -> Fut + Clone,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    if let Some(pool) = pool {
+        return pool
+            .with_sftp(profile, secret.as_deref(), operation)
+            .await;
+    }
+
+    // Fallback for smoke tests / callers without a pool: one-shot connection.
+    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
+    let sftp = Arc::new(Mutex::new(sftp));
+    operation(sftp).await
+}
+
+
 struct RemoteDirectoryPlan {
     directories: Vec<PathBuf>,
     files: Vec<RemoteFileTransfer>,
@@ -75,58 +237,67 @@ struct LocalFileTransfer {
 }
 
 pub async fn list_remote_dir(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     path: String,
     secret: Option<String>,
 ) -> Result<RemoteDirectoryListing> {
-    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    let directory = sftp.canonicalize(&path).await.unwrap_or(path);
-    let mut entries = Vec::new();
+    run_with_sftp_pool(pool, profile, secret, move |sftp| {
+        let path = path.clone();
+        async move {
+            let sftp = sftp.lock().await;
+            let directory = sftp.canonicalize(&path).await.unwrap_or(path);
+            let mut entries = Vec::new();
 
-    let read_dir = sftp
-        .read_dir(directory.clone())
-        .await
-        .with_context(|| format!("failed to list remote directory {directory}"))?;
+            let read_dir = sftp
+                .read_dir(directory.clone())
+                .await
+                .with_context(|| format!("failed to list remote directory {directory}"))?;
 
-    for entry in read_dir {
-        let name = entry.file_name();
-        let file_type = entry.file_type();
-        let kind = format!("{:?}", file_type);
-        let is_dir = file_type.is_dir();
-        let size = if is_dir {
-            None
-        } else {
-            Some(entry.metadata().len())
-        };
-        entries.push(RemoteDirEntry {
-            path: join_remote_path(&directory, &name),
-            name,
-            kind,
-            is_dir,
-            size,
-        });
-    }
+            for entry in read_dir {
+                let name = entry.file_name();
+                let file_type = entry.file_type();
+                let kind = format!("{:?}", file_type);
+                let is_dir = file_type.is_dir();
+                let size = if is_dir {
+                    None
+                } else {
+                    Some(entry.metadata().len())
+                };
+                entries.push(RemoteDirEntry {
+                    path: join_remote_path(&directory, &name),
+                    name,
+                    kind,
+                    is_dir,
+                    size,
+                });
+            }
 
-    entries.sort_by(|left, right| {
-        right
-            .is_dir
-            .cmp(&left.is_dir)
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-    });
+            entries.sort_by(|left, right| {
+                right
+                    .is_dir
+                    .cmp(&left.is_dir)
+                    .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            });
 
-    Ok(RemoteDirectoryListing { directory, entries })
+            Ok(RemoteDirectoryListing { directory, entries })
+        }
+    })
+    .await
 }
 
 pub async fn download_remote_file(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     remote_path: String,
     local_path: String,
     secret: Option<String>,
 ) -> Result<TransferResult> {
-    download_remote_file_with_progress(profile, remote_path, local_path, secret, None, |_| {}).await
+    download_remote_file_with_progress(pool, profile, remote_path, local_path, secret, None, |_| {}).await
 }
 
 pub async fn download_remote_file_with_progress<F>(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     remote_path: String,
     local_path: String,
@@ -137,54 +308,73 @@ pub async fn download_remote_file_with_progress<F>(
 where
     F: FnMut(TransferProgress) + Send,
 {
-    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    let total = sftp
-        .metadata(&remote_path)
-        .await
-        .ok()
-        .map(|metadata| metadata.len());
-    let mut remote_file = sftp
-        .open(&remote_path)
-        .await
-        .with_context(|| format!("failed to open remote file {remote_path}"))?;
+    let on_progress = Arc::new(Mutex::new(on_progress));
+    run_with_sftp_pool(pool, profile, secret, {
+        let remote_path = remote_path.clone();
+        let local_path = local_path.clone();
+        let cancel_rx = cancel_rx.clone();
+        let on_progress = on_progress.clone();
+        move |sftp| {
+            let remote_path = remote_path.clone();
+            let local_path = local_path.clone();
+            let cancel_rx = cancel_rx.clone();
+            let on_progress = on_progress.clone();
+            async move {
+                let sftp = sftp.lock().await;
+                let total = sftp
+                    .metadata(&remote_path)
+                    .await
+                    .ok()
+                    .map(|metadata| metadata.len());
+                let mut remote_file = sftp
+                    .open(&remote_path)
+                    .await
+                    .with_context(|| format!("failed to open remote file {remote_path}"))?;
 
-    let local_path_ref = Path::new(&local_path);
-    if let Some(parent) = local_path_ref.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("failed to create local directory {}", parent.display()))?;
-    }
+                let local_path_ref = Path::new(&local_path);
+                if let Some(parent) = local_path_ref.parent() {
+                    tokio::fs::create_dir_all(parent).await.with_context(|| {
+                        format!("failed to create local directory {}", parent.display())
+                    })?;
+                }
 
-    let mut local_file = TokioFile::create(&local_path)
-        .await
-        .with_context(|| format!("failed to create local file {local_path}"))?;
+                let mut local_file = TokioFile::create(&local_path)
+                    .await
+                    .with_context(|| format!("failed to create local file {local_path}"))?;
 
-    let bytes = copy_with_progress(
-        &mut remote_file,
-        &mut local_file,
-        total,
-        cancel_rx,
-        &mut on_progress,
-    )
-    .await
-    .with_context(|| format!("failed to download remote file {remote_path}"))?;
+                let mut progress = on_progress.lock().await;
+                let bytes = copy_with_progress(
+                    &mut remote_file,
+                    &mut local_file,
+                    total,
+                    cancel_rx,
+                    &mut *progress,
+                )
+                .await
+                .with_context(|| format!("failed to download remote file {remote_path}"))?;
 
-    Ok(TransferResult {
-        path: local_path,
-        bytes,
+                Ok(TransferResult {
+                    path: local_path,
+                    bytes,
+                })
+            }
+        }
     })
+    .await
 }
 
 pub async fn upload_local_file(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     local_path: String,
     remote_path: String,
     secret: Option<String>,
 ) -> Result<TransferResult> {
-    upload_local_file_with_progress(profile, local_path, remote_path, secret, None, |_| {}).await
+    upload_local_file_with_progress(pool, profile, local_path, remote_path, secret, None, |_| {}).await
 }
 
 pub async fn upload_local_file_with_progress<F>(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     local_path: String,
     remote_path: String,
@@ -195,36 +385,54 @@ pub async fn upload_local_file_with_progress<F>(
 where
     F: FnMut(TransferProgress) + Send,
 {
-    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    let total = tokio::fs::metadata(&local_path)
-        .await
-        .ok()
-        .map(|metadata| metadata.len());
-    let mut local_file = TokioFile::open(&local_path)
-        .await
-        .with_context(|| format!("failed to open local file {local_path}"))?;
-    let mut remote_file = sftp
-        .create(&remote_path)
-        .await
-        .with_context(|| format!("failed to create remote file {remote_path}"))?;
+    let on_progress = Arc::new(Mutex::new(on_progress));
+    run_with_sftp_pool(pool, profile, secret, {
+        let local_path = local_path.clone();
+        let remote_path = remote_path.clone();
+        let cancel_rx = cancel_rx.clone();
+        let on_progress = on_progress.clone();
+        move |sftp| {
+            let local_path = local_path.clone();
+            let remote_path = remote_path.clone();
+            let cancel_rx = cancel_rx.clone();
+            let on_progress = on_progress.clone();
+            async move {
+                let sftp = sftp.lock().await;
+                let total = tokio::fs::metadata(&local_path)
+                    .await
+                    .ok()
+                    .map(|metadata| metadata.len());
+                let mut local_file = TokioFile::open(&local_path)
+                    .await
+                    .with_context(|| format!("failed to open local file {local_path}"))?;
+                let mut remote_file = sftp
+                    .create(&remote_path)
+                    .await
+                    .with_context(|| format!("failed to create remote file {remote_path}"))?;
 
-    let bytes = copy_with_progress(
-        &mut local_file,
-        &mut remote_file,
-        total,
-        cancel_rx,
-        &mut on_progress,
-    )
-    .await
-    .with_context(|| format!("failed to upload local file {local_path}"))?;
+                let mut progress = on_progress.lock().await;
+                let bytes = copy_with_progress(
+                    &mut local_file,
+                    &mut remote_file,
+                    total,
+                    cancel_rx,
+                    &mut *progress,
+                )
+                .await
+                .with_context(|| format!("failed to upload local file {local_path}"))?;
 
-    Ok(TransferResult {
-        path: remote_path,
-        bytes,
+                Ok(TransferResult {
+                    path: remote_path,
+                    bytes,
+                })
+            }
+        }
     })
+    .await
 }
 
 pub async fn download_remote_directory_with_progress<F>(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     remote_path: String,
     local_path: String,
@@ -235,86 +443,119 @@ pub async fn download_remote_directory_with_progress<F>(
 where
     F: FnMut(TransferProgress) + Send,
 {
-    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    let directory = sftp.canonicalize(&remote_path).await.unwrap_or(remote_path);
-    let plan = build_remote_directory_plan(&sftp, &directory, PathBuf::from(&local_path)).await?;
-    let total_files = plan.files.len();
+    let on_progress = Arc::new(Mutex::new(on_progress));
+    run_with_sftp_pool(pool, profile, secret, {
+        let remote_path = remote_path.clone();
+        let local_path = local_path.clone();
+        let cancel_rx = cancel_rx.clone();
+        let on_progress = on_progress.clone();
+        move |sftp_handle| {
+            let remote_path = remote_path.clone();
+            let local_path = local_path.clone();
+            let cancel_rx = cancel_rx.clone();
+            let on_progress = on_progress.clone();
+            async move {
+                let sftp = sftp_handle.lock().await;
+                let directory = sftp.canonicalize(&remote_path).await.unwrap_or(remote_path);
+                let plan =
+                    build_remote_directory_plan(&sftp, &directory, PathBuf::from(&local_path))
+                        .await?;
+                let total_files = plan.files.len();
 
-    on_progress(TransferProgress {
-        transferred: 0,
-        total: Some(plan.total_bytes),
-        current_path: None,
-        completed_files: Some(0),
-        total_files: Some(total_files),
-    });
+                {
+                    let mut progress = on_progress.lock().await;
+                    progress(TransferProgress {
+                        transferred: 0,
+                        total: Some(plan.total_bytes),
+                        current_path: None,
+                        completed_files: Some(0),
+                        total_files: Some(total_files),
+                    });
+                }
 
-    for directory_path in &plan.directories {
-        ensure_not_cancelled(cancel_rx.as_ref())?;
-        fs::create_dir_all(directory_path).await.with_context(|| {
-            format!(
-                "failed to create local directory {}",
-                directory_path.display()
-            )
-        })?;
-    }
+                for directory_path in &plan.directories {
+                    ensure_not_cancelled(cancel_rx.as_ref())?;
+                    fs::create_dir_all(directory_path).await.with_context(|| {
+                        format!(
+                            "failed to create local directory {}",
+                            directory_path.display()
+                        )
+                    })?;
+                }
 
-    let mut transferred = 0_u64;
-    let mut completed_files = 0_usize;
-    for file in plan.files {
-        ensure_not_cancelled(cancel_rx.as_ref())?;
-        if let Some(parent) = file.local_path.parent() {
-            fs::create_dir_all(parent).await.with_context(|| {
-                format!("failed to create local directory {}", parent.display())
-            })?;
+                let mut transferred = 0_u64;
+                let mut completed_files = 0_usize;
+                for file in plan.files {
+                    ensure_not_cancelled(cancel_rx.as_ref())?;
+                    if let Some(parent) = file.local_path.parent() {
+                        fs::create_dir_all(parent).await.with_context(|| {
+                            format!("failed to create local directory {}", parent.display())
+                        })?;
+                    }
+
+                    let mut remote_file = sftp
+                        .open(&file.remote_path)
+                        .await
+                        .with_context(|| format!("failed to open remote file {}", file.remote_path))?;
+                    let mut local_file = TokioFile::create(&file.local_path).await.with_context(|| {
+                        format!("failed to create local file {}", file.local_path.display())
+                    })?;
+
+                    {
+                        let mut progress = on_progress.lock().await;
+                        progress(TransferProgress {
+                            transferred,
+                            total: Some(plan.total_bytes),
+                            current_path: Some(file.remote_path.clone()),
+                            completed_files: Some(completed_files),
+                            total_files: Some(total_files),
+                        });
+                    }
+
+                    {
+                        let mut progress = on_progress.lock().await;
+                        copy_with_aggregate_progress(
+                            &mut remote_file,
+                            &mut local_file,
+                            plan.total_bytes,
+                            cancel_rx.clone(),
+                            &mut transferred,
+                            &file.remote_path,
+                            completed_files,
+                            total_files,
+                            &mut *progress,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("failed to download remote file {}", file.remote_path)
+                        })?;
+                    }
+                    completed_files += 1;
+                }
+
+                {
+                    let mut progress = on_progress.lock().await;
+                    progress(TransferProgress {
+                        transferred,
+                        total: Some(plan.total_bytes),
+                        current_path: None,
+                        completed_files: Some(completed_files),
+                        total_files: Some(total_files),
+                    });
+                }
+
+                Ok(TransferResult {
+                    path: local_path,
+                    bytes: transferred,
+                })
+            }
         }
-
-        let mut remote_file = sftp
-            .open(&file.remote_path)
-            .await
-            .with_context(|| format!("failed to open remote file {}", file.remote_path))?;
-        let mut local_file = TokioFile::create(&file.local_path).await.with_context(|| {
-            format!("failed to create local file {}", file.local_path.display())
-        })?;
-
-        on_progress(TransferProgress {
-            transferred,
-            total: Some(plan.total_bytes),
-            current_path: Some(file.remote_path.clone()),
-            completed_files: Some(completed_files),
-            total_files: Some(total_files),
-        });
-
-        copy_with_aggregate_progress(
-            &mut remote_file,
-            &mut local_file,
-            plan.total_bytes,
-            cancel_rx.clone(),
-            &mut transferred,
-            &file.remote_path,
-            completed_files,
-            total_files,
-            &mut on_progress,
-        )
-        .await
-        .with_context(|| format!("failed to download remote file {}", file.remote_path))?;
-        completed_files += 1;
-    }
-
-    on_progress(TransferProgress {
-        transferred,
-        total: Some(plan.total_bytes),
-        current_path: None,
-        completed_files: Some(completed_files),
-        total_files: Some(total_files),
-    });
-
-    Ok(TransferResult {
-        path: local_path,
-        bytes: transferred,
     })
+    .await
 }
 
 pub async fn upload_local_directory_with_progress<F>(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     local_path: String,
     remote_path: String,
@@ -326,124 +567,176 @@ where
     F: FnMut(TransferProgress) + Send,
 {
     let plan = build_local_directory_plan(PathBuf::from(&local_path), remote_path.clone()).await?;
-    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    let total_files = plan.files.len();
+    let on_progress = Arc::new(Mutex::new(on_progress));
+    run_with_sftp_pool(pool, profile, secret, {
+        let remote_path = remote_path.clone();
+        let cancel_rx = cancel_rx.clone();
+        let on_progress = on_progress.clone();
+        let plan_directories = plan.directories.clone();
+        let plan_files = plan.files.iter().map(|f| (f.local_path.clone(), f.remote_path.clone())).collect::<Vec<_>>();
+        let plan_total_bytes = plan.total_bytes;
+        move |sftp_handle| {
+            let remote_path = remote_path.clone();
+            let cancel_rx = cancel_rx.clone();
+            let on_progress = on_progress.clone();
+            let plan_directories = plan_directories.clone();
+            let plan_files = plan_files.clone();
+            async move {
+                let sftp = sftp_handle.lock().await;
+                let total_files = plan_files.len();
 
-    on_progress(TransferProgress {
-        transferred: 0,
-        total: Some(plan.total_bytes),
-        current_path: None,
-        completed_files: Some(0),
-        total_files: Some(total_files),
-    });
+                {
+                    let mut progress = on_progress.lock().await;
+                    progress(TransferProgress {
+                        transferred: 0,
+                        total: Some(plan_total_bytes),
+                        current_path: None,
+                        completed_files: Some(0),
+                        total_files: Some(total_files),
+                    });
+                }
 
-    for directory in &plan.directories {
-        ensure_not_cancelled(cancel_rx.as_ref())?;
-        ensure_remote_dir_all(&sftp, directory).await?;
-    }
+                for directory in &plan_directories {
+                    ensure_not_cancelled(cancel_rx.as_ref())?;
+                    ensure_remote_dir_all(&sftp, directory).await?;
+                }
 
-    let mut transferred = 0_u64;
-    let mut completed_files = 0_usize;
-    for file in plan.files {
-        ensure_not_cancelled(cancel_rx.as_ref())?;
-        let mut local_file = TokioFile::open(&file.local_path)
-            .await
-            .with_context(|| format!("failed to open local file {}", file.local_path.display()))?;
-        let mut remote_file = sftp
-            .create(&file.remote_path)
-            .await
-            .with_context(|| format!("failed to create remote file {}", file.remote_path))?;
+                let mut transferred = 0_u64;
+                let mut completed_files = 0_usize;
+                for (local_file_path, remote_file_path) in plan_files {
+                    ensure_not_cancelled(cancel_rx.as_ref())?;
+                    let mut local_file = TokioFile::open(&local_file_path).await.with_context(|| {
+                        format!("failed to open local file {}", local_file_path.display())
+                    })?;
+                    let mut remote_file = sftp
+                        .create(&remote_file_path)
+                        .await
+                        .with_context(|| {
+                            format!("failed to create remote file {remote_file_path}")
+                        })?;
 
-        on_progress(TransferProgress {
-            transferred,
-            total: Some(plan.total_bytes),
-            current_path: Some(file.remote_path.clone()),
-            completed_files: Some(completed_files),
-            total_files: Some(total_files),
-        });
+                    {
+                        let mut progress = on_progress.lock().await;
+                        progress(TransferProgress {
+                            transferred,
+                            total: Some(plan_total_bytes),
+                            current_path: Some(remote_file_path.clone()),
+                            completed_files: Some(completed_files),
+                            total_files: Some(total_files),
+                        });
+                    }
 
-        copy_with_aggregate_progress(
-            &mut local_file,
-            &mut remote_file,
-            plan.total_bytes,
-            cancel_rx.clone(),
-            &mut transferred,
-            &file.remote_path,
-            completed_files,
-            total_files,
-            &mut on_progress,
-        )
-        .await
-        .with_context(|| format!("failed to upload local file {}", file.local_path.display()))?;
-        completed_files += 1;
-    }
+                    {
+                        let mut progress = on_progress.lock().await;
+                        copy_with_aggregate_progress(
+                            &mut local_file,
+                            &mut remote_file,
+                            plan_total_bytes,
+                            cancel_rx.clone(),
+                            &mut transferred,
+                            &remote_file_path,
+                            completed_files,
+                            total_files,
+                            &mut *progress,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to upload local file {}",
+                                local_file_path.display()
+                            )
+                        })?;
+                    }
+                    completed_files += 1;
+                }
 
-    on_progress(TransferProgress {
-        transferred,
-        total: Some(plan.total_bytes),
-        current_path: None,
-        completed_files: Some(completed_files),
-        total_files: Some(total_files),
-    });
+                {
+                    let mut progress = on_progress.lock().await;
+                    progress(TransferProgress {
+                        transferred,
+                        total: Some(plan_total_bytes),
+                        current_path: None,
+                        completed_files: Some(completed_files),
+                        total_files: Some(total_files),
+                    });
+                }
 
-    Ok(TransferResult {
-        path: remote_path,
-        bytes: transferred,
+                Ok(TransferResult {
+                    path: remote_path,
+                    bytes: transferred,
+                })
+            }
+        }
     })
+    .await
 }
 
 pub async fn create_remote_dir(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     remote_path: String,
     secret: Option<String>,
 ) -> Result<MutationResult> {
-    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    sftp.create_dir(&remote_path)
-        .await
-        .with_context(|| format!("failed to create remote directory {remote_path}"))?;
-
-    Ok(MutationResult { path: remote_path })
+    run_with_sftp_pool(pool, profile, secret, move |sftp| {
+        let remote_path = remote_path.clone();
+        async move {
+            let sftp = sftp.lock().await;
+            sftp.create_dir(&remote_path)
+                .await
+                .with_context(|| format!("failed to create remote directory {remote_path}"))?;
+            Ok(MutationResult { path: remote_path })
+        }
+    })
+    .await
 }
 
 pub async fn read_remote_text_file(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     remote_path: String,
     secret: Option<String>,
 ) -> Result<RemoteTextFile> {
-    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    let metadata = sftp
-        .metadata(&remote_path)
-        .await
-        .with_context(|| format!("failed to stat remote file {remote_path}"))?;
-    let size = metadata.len();
-    if size > MAX_TEXT_FILE_BYTES {
-        return Err(anyhow!(
-            "remote file {remote_path} is too large for the inline editor ({} bytes > {} bytes)",
-            size,
-            MAX_TEXT_FILE_BYTES
-        ));
-    }
+    run_with_sftp_pool(pool, profile, secret, move |sftp| {
+        let remote_path = remote_path.clone();
+        async move {
+            let sftp = sftp.lock().await;
+            let metadata = sftp
+                .metadata(&remote_path)
+                .await
+                .with_context(|| format!("failed to stat remote file {remote_path}"))?;
+            let size = metadata.len();
+            if size > MAX_TEXT_FILE_BYTES {
+                return Err(anyhow!(
+                    "remote file {remote_path} is too large for the inline editor ({} bytes > {} bytes)",
+                    size,
+                    MAX_TEXT_FILE_BYTES
+                ));
+            }
 
-    let mut remote_file = sftp
-        .open(&remote_path)
-        .await
-        .with_context(|| format!("failed to open remote file {remote_path}"))?;
-    let mut bytes = Vec::with_capacity(size as usize);
-    remote_file
-        .read_to_end(&mut bytes)
-        .await
-        .with_context(|| format!("failed to read remote file {remote_path}"))?;
-    let content = String::from_utf8(bytes)
-        .with_context(|| format!("remote file {remote_path} is not valid UTF-8 text"))?;
+            let mut remote_file = sftp
+                .open(&remote_path)
+                .await
+                .with_context(|| format!("failed to open remote file {remote_path}"))?;
+            let mut bytes = Vec::with_capacity(size as usize);
+            remote_file
+                .read_to_end(&mut bytes)
+                .await
+                .with_context(|| format!("failed to read remote file {remote_path}"))?;
+            let content = String::from_utf8(bytes)
+                .with_context(|| format!("remote file {remote_path} is not valid UTF-8 text"))?;
 
-    Ok(RemoteTextFile {
-        path: remote_path,
-        bytes: content.len(),
-        content,
+            Ok(RemoteTextFile {
+                path: remote_path,
+                bytes: content.len(),
+                content,
+            })
+        }
     })
+    .await
 }
 
 pub async fn write_remote_text_file(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     remote_path: String,
     content: String,
@@ -457,54 +750,74 @@ pub async fn write_remote_text_file(
         ));
     }
 
-    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    let mut remote_file = sftp
-        .create(&remote_path)
-        .await
-        .with_context(|| format!("failed to open remote file {remote_path} for writing"))?;
+    run_with_sftp_pool(pool, profile, secret, move |sftp| {
+        let remote_path = remote_path.clone();
+        let content = content.clone();
+        async move {
+            let sftp = sftp.lock().await;
+            let mut remote_file = sftp
+                .create(&remote_path)
+                .await
+                .with_context(|| format!("failed to open remote file {remote_path} for writing"))?;
 
-    remote_file
-        .write_all(content.as_bytes())
-        .await
-        .with_context(|| format!("failed to write remote file {remote_path}"))?;
-    remote_file
-        .flush()
-        .await
-        .with_context(|| format!("failed to flush remote file {remote_path}"))?;
+            remote_file
+                .write_all(content.as_bytes())
+                .await
+                .with_context(|| format!("failed to write remote file {remote_path}"))?;
+            remote_file
+                .flush()
+                .await
+                .with_context(|| format!("failed to flush remote file {remote_path}"))?;
 
-    Ok(MutationResult { path: remote_path })
+            Ok(MutationResult { path: remote_path })
+        }
+    })
+    .await
 }
 
 pub async fn rename_remote_path(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     source_path: String,
     target_path: String,
     secret: Option<String>,
 ) -> Result<MutationResult> {
-    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    sftp.rename(&source_path, &target_path)
-        .await
-        .with_context(|| format!("failed to rename remote path {source_path} to {target_path}"))?;
-
-    Ok(MutationResult { path: target_path })
+    run_with_sftp_pool(pool, profile, secret, move |sftp| {
+        let source_path = source_path.clone();
+        let target_path = target_path.clone();
+        async move {
+            let sftp = sftp.lock().await;
+            sftp.rename(&source_path, &target_path).await.with_context(|| {
+                format!("failed to rename remote path {source_path} to {target_path}")
+            })?;
+            Ok(MutationResult { path: target_path })
+        }
+    })
+    .await
 }
 
 pub async fn delete_remote_path(
+    pool: Option<&SftpPool>,
     profile: SessionProfile,
     remote_path: String,
     is_dir: bool,
     secret: Option<String>,
 ) -> Result<MutationResult> {
-    let (sftp, _driver) = open_sftp_raw(profile, secret.as_deref()).await?;
-    if is_dir {
-        delete_remote_directory_recursive(&sftp, &remote_path).await?;
-    } else {
-        sftp.remove_file(&remote_path)
-            .await
-            .with_context(|| format!("failed to remove remote file {remote_path}"))?;
-    }
-
-    Ok(MutationResult { path: remote_path })
+    run_with_sftp_pool(pool, profile, secret, move |sftp| {
+        let remote_path = remote_path.clone();
+        async move {
+            let sftp = sftp.lock().await;
+            if is_dir {
+                delete_remote_directory_recursive(&sftp, &remote_path).await?;
+            } else {
+                sftp.remove_file(&remote_path)
+                    .await
+                    .with_context(|| format!("failed to remove remote file {remote_path}"))?;
+            }
+            Ok(MutationResult { path: remote_path })
+        }
+    })
+    .await
 }
 
 async fn delete_remote_directory_recursive(sftp: &SftpSession, remote_root: &str) -> Result<()> {
